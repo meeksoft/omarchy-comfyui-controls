@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.meeksoft.comfyui",
+  "name": "ComfyUI Control",
+  "version": "0.0.0",
+  "author": "Meeksoft",
+  "license": "MIT",
+  "description": "Start, monitor, and open one local ComfyUI server from the Omarchy bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "ComfyUI",
+    "description": "Server health, queue activity, generation progress, and output previews for a local ComfyUI instance.",
+    "category": "AI",
+    "aliases": [
+      "comfy",
+      "comfyui",
+      "image-generation"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "host": "127.0.0.1",
+      "port": 8188,
+      "comfyRoot": "",
+      "pythonPath": "",
+      "refreshIntervalSec": 2
+    },
+    "schema": [
+      {
+        "key": "host",
+        "type": "string",
+        "label": "Server host",
+        "defaultValue": "127.0.0.1",
+        "description": "Use 127.0.0.1 for a local ComfyUI server."
+      },
+      {
+        "key": "port",
+        "type": "integer",
+        "label": "Server port",
+        "min": 1,
+        "max": 65535,
+        "step": 1,
+        "defaultValue": 8188
+      },
+      {
+        "key": "comfyRoot",
+        "type": "path",
+        "label": "ComfyUI folder",
+        "defaultValue": "",
+        "description": "Folder containing main.py. Stored only in the user's Omarchy configuration."
+      },
+      {
+        "key": "pythonPath",
+        "type": "path",
+        "label": "Python executable",
+        "defaultValue": "",
+        "description": "Optional. Leave blank to detect a virtual environment inside the ComfyUI folder."
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 1,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 2
+      }
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+.cache/
+.tmp/
+*.log
+*.pid
+*.local
+config.local.json
+
