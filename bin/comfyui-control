@@ -27,9 +27,9 @@ def api(host, port, path, method="GET", body=None, timeout=1.5):
         return json.load(response)
 
 
-def health(host, port):
+def health(host, port, timeout=1.5):
     try:
-        value = api(host, port, "/system_stats")
+        value = api(host, port, "/system_stats", timeout=timeout)
         system, devices = value.get("system", {}), value.get("devices", [])
         version = system.get("comfyui_version")
         if not version:
@@ -57,7 +57,7 @@ def key(host, port):
 def data_dir(runtime=False):
     if runtime:
         base = os.environ.get("XDG_RUNTIME_DIR")
-        path = Path(base) if base else Path("/tmp") / f"comfyui-control-{os.getuid()}"
+        path = ((Path(base) if base else Path("/tmp") / f"comfyui-control-{os.getuid()}") / "comfyui-control")
     else:
         base = os.environ.get("XDG_STATE_HOME")
         path = (Path(base) if base else Path.home() / ".local/state") / "omarchy/comfyui-control"
@@ -176,8 +176,9 @@ def journal_summary(host, port):
 
 def status(host, port, log_path=""):
     info = health(host, port)
+    occupied = info is None and port_open(host, port)
+    if info is None and occupied: info = health(host, port, 5.0)
     if not info:
-        occupied = port_open(host, port)
         stale_managed = load_state(host, port) is not None and not owned(host, port)
         state = "foreign-port" if occupied else "crashed" if stale_managed else "offline"
         return {"ok": True, "state": state, "healthy": False, "owned": owned(host, port),
@@ -297,12 +298,15 @@ def watch(host, port):
     if not bytes(response).startswith(b"HTTP/1.1 101"):
         raise ConnectionError("WebSocket upgrade rejected")
     with connection:
+        connection.settimeout(None)
         while True:
             first, second = exact(connection, 2); opcode, length = first & 15, second & 127
             if length == 126: length = struct.unpack("!H", exact(connection, 2))[0]
             elif length == 127: length = struct.unpack("!Q", exact(connection, 8))[0]
             payload = exact(connection, length)
             if opcode == 8: return 0
+            if opcode == 9 and len(payload) < 126:
+                connection.sendall(bytes((0x8A, len(payload))) + payload)
             if opcode != 1: continue
             try: message = json.loads(payload)
             except (UnicodeDecodeError, ValueError): continue

@@ -1,6 +1,11 @@
+import base64
+import hashlib
 import json
 import importlib.util
 import importlib.machinery
+import os
+import re
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import socket
@@ -46,6 +51,73 @@ class ComfyHandler(BaseHTTPRequestHandler):
 
     def log_message(self, *_args):
         pass
+
+
+class SlowComfyHandler(ComfyHandler):
+    """Answers /system_stats slower than the first status probe but in time for the retry."""
+
+    def do_GET(self):
+        if self.path == "/system_stats":
+            time.sleep(2.0)
+            self.reply({"system": {"comfyui_version": "test"}, "devices": []})
+        elif self.path == "/queue":
+            self.reply({"queue_running": [], "queue_pending": []})
+        elif self.path.startswith("/history"):
+            self.reply({})
+        else:
+            self.send_error(404)
+
+
+class QuietHTTPServer(ThreadingHTTPServer):
+    def handle_error(self, request, client_address):
+        pass
+
+
+WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+class FakeComfySocket:
+    """Minimal /ws endpoint that stays silent, then pings before sending any events."""
+
+    def __init__(self, idle_before_ping=0.0):
+        self.listener = socket.create_server(("127.0.0.1", 0))
+        self.pongs = []
+        self.idle_before_ping = idle_before_ping
+
+    @property
+    def port(self):
+        return self.listener.getsockname()[1]
+
+    def serve(self):
+        connection, _ = self.listener.accept()
+        with connection:
+            connection.settimeout(10)
+            request = bytearray()
+            while b"\r\n\r\n" not in request:
+                request.extend(connection.recv(4096))
+            key = re.search(rb"Sec-WebSocket-Key: (\S+)", bytes(request)).group(1)
+            accept = base64.b64encode(hashlib.sha1(key + WEBSOCKET_GUID.encode()).digest())
+            connection.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                               b"Connection: Upgrade\r\nSec-WebSocket-Accept: " + accept + b"\r\n\r\n")
+            time.sleep(self.idle_before_ping)
+            connection.sendall(b"\x89\x04ping")
+            header = self.receive(connection, 2)
+            if header[0] & 0x0F == 0x0A:
+                self.pongs.append(self.receive(connection, header[1] & 0x7F))
+            payload = json.dumps({"type": "status", "data": {"status": {"exec_info": {"queue_remaining": 1}}}}).encode()
+            connection.sendall(bytes((0x81, len(payload))) + payload)
+            connection.sendall(b"\x88\x00")
+        self.listener.close()
+
+    @staticmethod
+    def receive(connection, count):
+        result = bytearray()
+        while len(result) < count:
+            part = connection.recv(count - len(result))
+            if not part:
+                raise ConnectionError("client closed")
+            result.extend(part)
+        return bytes(result)
 
 
 class ControllerTests(unittest.TestCase):
@@ -113,6 +185,43 @@ class ControllerTests(unittest.TestCase):
             result = controller.start(args)
         self.assertEqual("starting", result["state"])
         run.assert_not_called()
+
+    def test_slow_server_is_not_reported_as_foreign_port(self):
+        server = QuietHTTPServer(("127.0.0.1", 0), SlowComfyHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            self.assertEqual("idle", self.run_status(server.server_port)["state"])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_runtime_dir_places_locks_in_plugin_subdirectory(self):
+        controller = load_controller()
+        with tempfile.TemporaryDirectory() as base:
+            with patch.dict(controller.os.environ, {"XDG_RUNTIME_DIR": base}):
+                self.assertEqual(Path(base) / "comfyui-control", controller.data_dir(True))
+
+    def test_runtime_dir_falls_back_to_private_tmp_subdirectory(self):
+        controller = load_controller()
+        with patch.dict(controller.os.environ, {}, clear=True):
+            expected = Path(f"/tmp/comfyui-control-{os.getuid()}") / "comfyui-control"
+            self.assertEqual(expected, controller.data_dir(True))
+
+    def test_watch_answers_pings_after_idle_silence(self):
+        fake = FakeComfySocket(idle_before_ping=5.5)
+        thread = threading.Thread(target=fake.serve, daemon=True)
+        thread.start()
+        try:
+            result = subprocess.run(
+                ["python3", str(CONTROLLER), "watch", "--host", "127.0.0.1", "--port", str(fake.port)],
+                text=True, capture_output=True, timeout=20,
+            )
+        finally:
+            thread.join(timeout=5)
+        self.assertEqual(0, result.returncode)
+        self.assertEqual([b"ping"], fake.pongs)
+        self.assertIn('"type":"status"', result.stdout)
 
     def test_log_summary_strips_terminal_noise_and_duplicates(self):
         controller = load_controller()
