@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.meeksoft.comfyui",
   "name": "ComfyUI Control",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "author": "Meeksoft",
   "license": "MIT",
   "description": "Start, monitor, and open one local ComfyUI server from the Omarchy bar.",
@@ -29,6 +29,8 @@
       "port": 8188,
       "comfyRoot": "",
       "pythonPath": "",
+      "logPath": "",
+      "showPreviewByDefault": false,
       "refreshIntervalSec": 2
     },
     "schema": [
@@ -61,6 +63,19 @@
         "label": "Python executable",
         "defaultValue": "",
         "description": "Optional. Leave blank to detect a virtual environment inside the ComfyUI folder."
+      },
+      {
+        "key": "logPath",
+        "type": "path",
+        "label": "External server log",
+        "defaultValue": "",
+        "description": "Optional log file to read when ComfyUI is started outside this plugin."
+      },
+      {
+        "key": "showPreviewByDefault",
+        "type": "boolean",
+        "label": "Expand latest output by default",
+        "defaultValue": false
       },
       {
         "key": "refreshIntervalSec",

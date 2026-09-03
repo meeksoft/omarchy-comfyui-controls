@@ -15,6 +15,10 @@ Item {
   property double vramTotal: 0
   property double vramFree: 0
   property string previewUrl: ""
+  property var jobs: []
+  property var outputs: []
+  property var recentEvents: []
+  property var logEvents: []
   property string serverUrl: ""
   property string progressNode: ""
   property int progressValue: 0
@@ -22,9 +26,21 @@ Item {
   property string actionStatus: ""
   property string lastError: ""
   property bool refreshing: false
+  property double nowMs: Date.now()
+  property double jobStartMs: 0
+  property bool jobStartExact: false
+  property double nodeStartMs: 0
+  property double lastProgressMs: 0
+  property int lastProgressValue: 0
+  property real secondsPerStep: 0
 
   readonly property bool busy: actionProcess.running
+  readonly property var latestOutput: outputs.length > 0 ? outputs[0] : ({})
   readonly property real progress: progressMax > 0 ? progressValue / progressMax : 0
+  readonly property int elapsedSeconds: jobStartMs > 0 ? Math.max(0, Math.floor((nowMs - jobStartMs) / 1000)) : 0
+  readonly property int nodeElapsedSeconds: nodeStartMs > 0 ? Math.max(0, Math.floor((nowMs - nodeStartMs) / 1000)) : 0
+  readonly property int etaSeconds: secondsPerStep > 0 && progressMax > progressValue
+    ? Math.max(0, Math.round(secondsPerStep * (progressMax - progressValue))) : -1
   readonly property string helperPath: decodeURIComponent(Qt.resolvedUrl("bin/comfyui-control").toString().replace(/^file:\/\//, ""))
   readonly property string host: stringSetting("host", "127.0.0.1")
   readonly property int port: intSetting("port", 8188, 1, 65535)
@@ -40,7 +56,14 @@ Item {
     if (!isFinite(value)) value = fallback
     return Math.max(min, Math.min(max, value))
   }
-  function commonArgs(command) { return [helperPath, command, "--host", host, "--port", String(port)] }
+  function boolSetting(name, fallback) {
+    var value = setting(name, fallback)
+    return value === true || String(value).toLowerCase() === "true"
+  }
+  function commonArgs(command) {
+    return [helperPath, command, "--host", host, "--port", String(port),
+            "--log-path", String(setting("logPath", ""))]
+  }
   function refresh() {
     if (statusProcess.running) return
     refreshing = true; statusProcess.command = commonArgs("status"); statusProcess.running = true
@@ -67,9 +90,16 @@ Item {
     runningCount = Number(parsed.running || 0); pendingCount = Number(parsed.pending || 0)
     version = String(parsed.version || ""); device = String(parsed.device || "")
     vramTotal = Number(parsed.vramTotal || 0); vramFree = Number(parsed.vramFree || 0)
+    jobs = parsed.jobs || []; outputs = parsed.outputs || []
+    recentEvents = parsed.recentEvents || []; logEvents = parsed.logEvents || []
     serverUrl = String(parsed.url || ("http://" + host + ":" + port))
-    if (parsed.previewUrl) previewUrl = String(parsed.previewUrl)
-    if (state !== "generating") { progressNode = ""; progressValue = 0; progressMax = 0 }
+    previewUrl = outputs.length > 0 ? String(outputs[0].viewUrl || "") : ""
+    if (state === "generating" && jobStartMs === 0) {
+      jobStartMs = Date.now(); jobStartExact = false
+    } else if (state !== "generating") {
+      progressNode = ""; progressValue = 0; progressMax = 0
+      jobStartMs = 0; nodeStartMs = 0; secondsPerStep = 0; lastProgressMs = 0; lastProgressValue = 0
+    }
     if (parsed.ok === false) lastError = String(parsed.message || "Controller error")
     else if (state !== "error" && state !== "foreign-port") lastError = ""
     updateWatcher()
@@ -78,13 +108,37 @@ Item {
     var event
     try { event = JSON.parse(String(raw || "{}")) } catch (error) { return }
     if (event.type === "progress") {
-      progressValue = Number(event.value || 0); progressMax = Number(event.max || 0)
-      progressNode = String(event.node || ""); state = "generating"
+      var eventNode = String(event.node || "")
+      var value = Number(event.value || 0)
+      var moment = Date.now()
+      if (eventNode !== progressNode) {
+        progressNode = eventNode; nodeStartMs = moment; secondsPerStep = 0; lastProgressMs = 0; lastProgressValue = 0
+      }
+      if (lastProgressMs > 0 && value > lastProgressValue) {
+        var sample = (moment - lastProgressMs) / 1000 / (value - lastProgressValue)
+        secondsPerStep = secondsPerStep > 0 ? secondsPerStep * 0.7 + sample * 0.3 : sample
+      }
+      progressValue = value; progressMax = Number(event.max || 0)
+      lastProgressMs = moment; lastProgressValue = value; state = "generating"
+      if (jobStartMs === 0) { jobStartMs = moment; jobStartExact = false }
     } else if (event.type === "executing") {
-      progressNode = String(event.node || ""); if (progressNode === "") refreshSoon.restart()
+      var nextNode = String(event.node || "")
+      if (nextNode !== "" && nextNode !== progressNode) {
+        progressNode = nextNode; nodeStartMs = Date.now(); progressValue = 0; progressMax = 0
+        secondsPerStep = 0; lastProgressMs = 0; lastProgressValue = 0
+      }
+      if (nextNode === "") refreshSoon.restart()
+    } else if (event.type === "execution_start") {
+      jobStartMs = Number(event.timestamp || Date.now()); jobStartExact = true; state = "generating"
+    } else if (event.type === "execution_success") {
+      refreshSoon.restart()
     } else if (event.type === "status" && Number(event.queueRemaining || 0) === 0) refreshSoon.restart()
     else if (event.type === "execution_error" || event.type === "execution_interrupted") {
-      lastError = String(event.message || "ComfyUI execution stopped"); refreshSoon.restart()
+      lastError = String(event.message || "ComfyUI execution stopped")
+      recentEvents = [{ level: event.type === "execution_error" ? "error" : "warning",
+                        kind: event.type, timestamp: Number(event.timestamp || Date.now()),
+                        promptId: String(event.promptId || ""), message: lastError }].concat(recentEvents).slice(0, 20)
+      refreshSoon.restart()
     }
   }
   function updateWatcher() {
@@ -93,6 +147,7 @@ Item {
   }
 
   Timer { interval: root.refreshIntervalSec * 1000; repeat: true; running: true; triggeredOnStart: true; onTriggered: root.refresh() }
+  Timer { interval: 1000; repeat: true; running: true; onTriggered: root.nowMs = Date.now() }
   Timer { id: refreshSoon; interval: 300; onTriggered: root.refresh() }
   Timer { id: reconnectTimer; interval: 1500; onTriggered: root.updateWatcher() }
   Timer { id: actionMessageTimer; interval: 3000; onTriggered: root.actionStatus = "" }

@@ -17,6 +17,10 @@ a single-instance controller.
 - Show offline, starting, idle, generating, and error states.
 - Show running and queued prompt counts.
 - Show current generation progress and the latest available preview.
+- Show observed/exact start time, elapsed time, and a smoothed current-node ETA.
+- Expand running and pending job details.
+- Keep output previews collapsed by default and show output metadata on demand.
+- Surface recent execution failures and optionally summarize an external log.
 - Open ComfyUI in the default browser.
 - Stop only the server instance managed by this plugin.
 - Surface useful startup diagnostics without exposing private configuration.
@@ -30,6 +34,10 @@ with `omarchy plugin add`.
 The panel can safely attach to an existing server. It only offers **Stop** for
 a server it started itself.
 
+When the panel is focused, press `P` to expand the latest output, `J` to toggle
+the jobs list, `E` to toggle diagnostics, `R` to refresh, or `O` to open
+ComfyUI.
+
 ## Configuration
 
 The plugin manifest defines these per-user settings:
@@ -38,10 +46,15 @@ The plugin manifest defines these per-user settings:
 - Optional Python executable
 - Server host and port
 - Status refresh interval
+- Optional external server log file
+- Whether the latest output preview starts expanded
 
 Machine-specific values belong in the user's Omarchy configuration. Do not add
 absolute installation paths, credentials, generated images, or runtime logs to
 this repository.
+
+ComfyUI's progress events describe the active node. ETA is therefore labeled
+as a current-node estimate rather than a promise for the entire workflow.
 
 ## Development
 

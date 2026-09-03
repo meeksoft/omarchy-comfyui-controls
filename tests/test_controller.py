@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import socket
 import subprocess
+import tempfile
 import threading
 import unittest
 from contextlib import nullcontext
@@ -65,6 +66,8 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(1, value["pending"])
             self.assertEqual("test", value["version"])
             self.assertIn("/view?", value["previewUrl"])
+            self.assertEqual("result.png", value["outputs"][0]["filename"])
+            self.assertEqual("image", value["outputs"][0]["mediaKind"])
         finally:
             server.shutdown()
             server.server_close()
@@ -85,10 +88,22 @@ class ControllerTests(unittest.TestCase):
         listener.close()
         self.assertEqual("offline", self.run_status(port)["state"])
 
+    def test_reports_stopped_managed_server_as_crashed(self):
+        controller = load_controller()
+        with patch.object(controller, "health", return_value=None), \
+             patch.object(controller, "port_open", return_value=False), \
+             patch.object(controller, "load_state", return_value={"unit": "omarchy-comfyui-test.service"}), \
+             patch.object(controller, "owned", return_value=False), \
+             patch.object(controller, "log_summary", return_value=[]), \
+             patch.object(controller, "journal_summary", return_value=[{"level": "error", "message": "stopped"}]):
+            value = controller.status("127.0.0.1", 8188)
+        self.assertEqual("crashed", value["state"])
+        self.assertEqual("stopped", value["logEvents"][0]["message"])
+
     def test_does_not_launch_again_while_managed_server_starts(self):
         controller = load_controller()
         args = type("Args", (), {
-            "host": "127.0.0.1", "port": 8188, "root": "", "python": "", "start_timeout": 0,
+            "host": "127.0.0.1", "port": 8188, "root": "", "python": "", "log_path": "", "start_timeout": 0,
         })()
         starting = {"ok": True, "state": "offline", "healthy": False, "owned": True,
                     "running": 0, "pending": 0}
@@ -98,6 +113,19 @@ class ControllerTests(unittest.TestCase):
             result = controller.start(args)
         self.assertEqual("starting", result["state"])
         run.assert_not_called()
+
+    def test_log_summary_strips_terminal_noise_and_duplicates(self):
+        controller = load_controller()
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as log:
+            log.write("\x1b[31m[ERROR] failed node\x1b[0m\n")
+            log.write("\x1b[31m[ERROR] failed node\x1b[0m\n")
+            log.write("50%|#####| 20/40 [00:03<00:03]\n")
+            log.write("[INFO] Prompt executed in 3.2 seconds\n")
+            log.flush()
+            events = controller.log_summary(log.name)
+        self.assertEqual(2, len(events))
+        self.assertFalse(any("\x1b" in event["message"] for event in events))
+        self.assertFalse(any("20/40" in event["message"] for event in events))
 
 
 if __name__ == "__main__":

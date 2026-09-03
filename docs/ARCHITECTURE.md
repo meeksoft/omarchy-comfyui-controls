@@ -40,6 +40,7 @@ process name.
 - `generating`: healthy server with an active prompt
 - `queued`: healthy server with pending work but no active execution
 - `foreign-port`: configured port is occupied by something other than ComfyUI
+- `crashed`: a plugin-managed service exited without a requested stop
 - `error`: controller or API failure with a user-actionable message
 
 ## Public-data policy

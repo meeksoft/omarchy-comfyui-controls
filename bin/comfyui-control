@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Dependency-free lifecycle and status helper for ComfyUI Control."""
 
-import argparse, base64, fcntl, hashlib, json, os, secrets, socket, struct, subprocess, time, uuid
+import argparse, base64, fcntl, hashlib, json, os, re, secrets, socket, struct, subprocess, time, uuid
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -88,36 +88,117 @@ def owned(host, port):
     return bool(value and unit_active(value["unit"]))
 
 
-def latest(host, port):
+def queue_job(item, state, position):
+    if not isinstance(item, list) or len(item) < 4:
+        return {"state": state, "position": position, "promptId": "", "number": position}
+    prompt = item[2] if isinstance(item[2], dict) else {}
+    extra = item[3] if isinstance(item[3], dict) else {}
+    return {"state": state, "position": position, "number": item[0], "promptId": str(item[1]),
+            "createdAt": int(extra.get("create_time", 0) or 0), "nodeCount": len(prompt),
+            "outputNodeCount": len(item[4]) if len(item) > 4 and isinstance(item[4], list) else 0}
+
+
+def history_summary(host, port):
+    outputs, events = [], []
     try:
-        history = api(host, port, "/history?max_items=1")
+        history = api(host, port, "/history?max_items=8")
         for prompt_id, item in reversed(list(history.items())):
+            messages = item.get("status", {}).get("messages", [])
+            completed_at = 0
+            for message in messages:
+                if not isinstance(message, list) or len(message) < 2 or not isinstance(message[1], dict):
+                    continue
+                kind, data = str(message[0]), message[1]
+                timestamp = int(data.get("timestamp", 0) or 0)
+                if kind == "execution_success": completed_at = timestamp
+                if kind in {"execution_error", "execution_interrupted"}:
+                    events.append({"level": "error" if kind == "execution_error" else "warning",
+                                   "kind": kind, "timestamp": timestamp, "promptId": str(prompt_id),
+                                   "message": str(data.get("exception_message") or kind.replace("_", " "))[:240]})
             for output in reversed(list(item.get("outputs", {}).values())):
-                images = output.get("images", [])
-                if images:
-                    image = images[-1]
-                    query = urlencode({"filename": image["filename"], "subfolder": image.get("subfolder", ""),
-                                       "type": image.get("type", "output")})
-                    return {"promptId": prompt_id, "previewUrl": url(host, port, f"/view?{query}")}
+                if not isinstance(output, dict): continue
+                for field, media_kind in (("images", "image"), ("gifs", "video"), ("videos", "video"), ("audio", "audio")):
+                    for media in reversed(output.get(field, [])):
+                        if not isinstance(media, dict) or not media.get("filename"): continue
+                        query = urlencode({"filename": media["filename"], "subfolder": media.get("subfolder", ""),
+                                           "type": media.get("type", "output")})
+                        outputs.append({"promptId": str(prompt_id), "filename": str(media["filename"]),
+                                        "subfolder": str(media.get("subfolder", "")), "type": str(media.get("type", "output")),
+                                        "mediaKind": media_kind, "completedAt": completed_at,
+                                        "viewUrl": url(host, port, f"/view?{query}")})
+                        if len(outputs) >= 12: break
+                    if len(outputs) >= 12: break
+                if len(outputs) >= 12: break
+            if len(outputs) >= 12: break
     except (OSError, ValueError, KeyError, HTTPError, URLError):
         pass
-    return {}
+    events.sort(key=lambda item: item.get("timestamp", 0), reverse=True)
+    return {"outputs": outputs, "recentEvents": events[:20]}
 
 
-def status(host, port):
+def summarize_log_text(text):
+    result, seen = [], set()
+    ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+    progress_bar = re.compile(r"^\s*\d+%\|.*\|\s*\d+/\d+")
+    for line in reversed(text.splitlines()):
+        clean = ansi.sub("", line).replace("\x00", "").strip()
+        if not clean or progress_bar.match(clean): continue
+        upper = clean.upper()
+        level = "error" if "ERROR" in upper or "TRACEBACK" in upper else "warning" if "WARN" in upper else "info"
+        significant = level != "info" or any(token in upper for token in ("[INFO]", "START", "PROMPT", "EXECUT", "SERVER"))
+        fingerprint = re.sub(r"\s+", " ", clean)
+        if significant and fingerprint not in seen:
+            result.append({"level": level, "message": clean[:300]})
+            seen.add(fingerprint)
+        if len(result) >= 30: break
+    return result
+
+
+def log_summary(path_value):
+    if not path_value: return []
+    path = Path(path_value).expanduser()
+    if not path.is_file(): return []
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END); size = handle.tell(); handle.seek(max(0, size - 65536))
+            return summarize_log_text(handle.read().decode(errors="replace"))
+    except OSError:
+        return []
+
+
+def journal_summary(host, port):
+    value = load_state(host, port)
+    if not value: return []
+    result = subprocess.run(["journalctl", "--user", "-u", value["unit"], "-n", "200", "-o", "cat", "--no-pager"],
+                            text=True, capture_output=True)
+    return summarize_log_text(result.stdout) if result.returncode == 0 else []
+
+
+def status(host, port, log_path=""):
     info = health(host, port)
     if not info:
-        state = "foreign-port" if port_open(host, port) else "offline"
+        occupied = port_open(host, port)
+        stale_managed = load_state(host, port) is not None and not owned(host, port)
+        state = "foreign-port" if occupied else "crashed" if stale_managed else "offline"
         return {"ok": True, "state": state, "healthy": False, "owned": owned(host, port),
-                "running": 0, "pending": 0, "url": url(host, port)}
+                "running": 0, "pending": 0, "jobs": [], "outputs": [], "recentEvents": [],
+                "logEvents": (log_summary(log_path) + journal_summary(host, port))[:30], "url": url(host, port)}
     try:
         queue = api(host, port, "/queue")
-        running, pending = len(queue.get("queue_running", [])), len(queue.get("queue_pending", []))
+        running_items, pending_items = queue.get("queue_running", []), queue.get("queue_pending", [])
+        running, pending = len(running_items), len(pending_items)
+        jobs = ([queue_job(item, "running", index + 1) for index, item in enumerate(running_items)] +
+                [queue_job(item, "pending", index + 1) for index, item in enumerate(pending_items)])
     except (OSError, ValueError, HTTPError, URLError):
-        running = pending = 0
+        running = pending = 0; jobs = []
     state = "generating" if running else "queued" if pending else "idle"
+    history = history_summary(host, port)
+    outputs = history["outputs"]
     return {"ok": True, "state": state, "healthy": True, "owned": owned(host, port),
-            "running": running, "pending": pending, "url": url(host, port), **info, **latest(host, port)}
+            "running": running, "pending": pending, "jobs": jobs, "outputs": outputs,
+            "previewUrl": outputs[0]["viewUrl"] if outputs else "", "url": url(host, port),
+            "recentEvents": history["recentEvents"],
+            "logEvents": (log_summary(log_path) + journal_summary(host, port))[:30], **info}
 
 
 def lock(host, port):
@@ -136,7 +217,7 @@ def start(args):
     if args.host.lower() not in {"127.0.0.1", "localhost", "::1"}:
         return {"ok": False, "state": "error", "message": "Only local servers can be started."}
     with lock(args.host, args.port):
-        current = status(args.host, args.port)
+        current = status(args.host, args.port, args.log_path)
         if current["healthy"]:
             return {**current, "message": "Using the running ComfyUI server."}
         if current["state"] == "foreign-port":
@@ -161,7 +242,7 @@ def start(args):
         temporary.chmod(0o600); temporary.replace(path)
     deadline = time.monotonic() + args.start_timeout
     while time.monotonic() < deadline:
-        current = status(args.host, args.port)
+        current = status(args.host, args.port, args.log_path)
         if current["healthy"]:
             return {**current, "message": "ComfyUI started."}
         if not unit_active(unit):
@@ -234,13 +315,18 @@ def watch(host, port):
                 event.update(node=str(data.get("node") or ""), promptId=str(data.get("prompt_id", "")))
             elif event_type == "status":
                 event["queueRemaining"] = int(data.get("status", {}).get("exec_info", {}).get("queue_remaining", 0) or 0)
+            elif event_type in {"execution_start", "execution_success"}:
+                event.update(promptId=str(data.get("prompt_id", "")),
+                             timestamp=int(data.get("timestamp", 0) or int(time.time() * 1000)))
             elif event_type in {"execution_error", "execution_interrupted"}:
-                event["message"] = str(data.get("exception_message") or event_type.replace("_", " "))
+                event.update(message=str(data.get("exception_message") or event_type.replace("_", " ")),
+                             promptId=str(data.get("prompt_id", "")),
+                             timestamp=int(data.get("timestamp", 0) or int(time.time() * 1000)))
             emit(event)
 
 
 def arguments():
-    common = argparse.ArgumentParser(add_help=False); common.add_argument("--host", default="127.0.0.1"); common.add_argument("--port", type=int, default=8188)
+    common = argparse.ArgumentParser(add_help=False); common.add_argument("--host", default="127.0.0.1"); common.add_argument("--port", type=int, default=8188); common.add_argument("--log-path", default="")
     parser = argparse.ArgumentParser(); commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status", parents=[common]); launch = commands.add_parser("start", parents=[common])
     launch.add_argument("--root", default=""); launch.add_argument("--python", default=""); launch.add_argument("--start-timeout", type=float, default=30)
@@ -253,7 +339,7 @@ def main():
     try:
         if not 1 <= args.port <= 65535: raise ValueError("Port must be between 1 and 65535.")
         if args.command == "watch": return watch(args.host, args.port)
-        result = status(args.host, args.port) if args.command == "status" else start(args) if args.command == "start" else stop(args.host, args.port) if args.command == "stop" else interrupt(args.host, args.port)
+        result = status(args.host, args.port, args.log_path) if args.command == "status" else start(args) if args.command == "start" else stop(args.host, args.port) if args.command == "stop" else interrupt(args.host, args.port)
         emit(result); return 0 if result.get("ok") else 1
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         emit({"ok": False, "state": "error", "message": str(error)[:240]}); return 1
