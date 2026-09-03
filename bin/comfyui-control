@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Dependency-free lifecycle and status helper for ComfyUI Control."""
+
+import argparse, base64, fcntl, hashlib, json, os, secrets, socket, struct, subprocess, time, uuid
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+UNIT_PREFIX = "omarchy-comfyui-"
+
+
+def emit(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+
+def url(host, port, path=""):
+    host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return f"http://{host}:{port}{path}"
+
+
+def api(host, port, path, method="GET", body=None, timeout=1.5):
+    request = Request(url(host, port, path), data=body, method=method)
+    if body is not None:
+        request.add_header("Content-Type", "application/json")
+    with urlopen(request, timeout=timeout) as response:
+        return json.load(response)
+
+
+def health(host, port):
+    try:
+        value = api(host, port, "/system_stats")
+        system, devices = value.get("system", {}), value.get("devices", [])
+        version = system.get("comfyui_version")
+        if not version:
+            return None
+        device = devices[0] if devices else {}
+        return {"version": version, "device": str(device.get("name", "")),
+                "vramTotal": int(device.get("vram_total", 0) or 0),
+                "vramFree": int(device.get("vram_free", 0) or 0)}
+    except (OSError, ValueError, HTTPError, URLError):
+        return None
+
+
+def port_open(host, port):
+    try:
+        with socket.create_connection((host, port), timeout=.4):
+            return True
+    except OSError:
+        return False
+
+
+def key(host, port):
+    return hashlib.sha256(f"{host}:{port}".encode()).hexdigest()[:16]
+
+
+def data_dir(runtime=False):
+    if runtime:
+        base = os.environ.get("XDG_RUNTIME_DIR")
+        path = Path(base) if base else Path("/tmp") / f"comfyui-control-{os.getuid()}"
+    else:
+        base = os.environ.get("XDG_STATE_HOME")
+        path = (Path(base) if base else Path.home() / ".local/state") / "omarchy/comfyui-control"
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return path
+
+
+def state_path(host, port):
+    return data_dir() / f"{key(host, port)}.json"
+
+
+def load_state(host, port):
+    try:
+        value = json.loads(state_path(host, port).read_text())
+        unit = str(value.get("unit", ""))
+        return value if unit.startswith(UNIT_PREFIX) and unit.endswith(".service") else None
+    except (OSError, ValueError):
+        return None
+
+
+def unit_active(unit):
+    return subprocess.run(["systemctl", "--user", "is-active", "--quiet", unit],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+
+def owned(host, port):
+    value = load_state(host, port)
+    return bool(value and unit_active(value["unit"]))
+
+
+def latest(host, port):
+    try:
+        history = api(host, port, "/history?max_items=1")
+        for prompt_id, item in reversed(list(history.items())):
+            for output in reversed(list(item.get("outputs", {}).values())):
+                images = output.get("images", [])
+                if images:
+                    image = images[-1]
+                    query = urlencode({"filename": image["filename"], "subfolder": image.get("subfolder", ""),
+                                       "type": image.get("type", "output")})
+                    return {"promptId": prompt_id, "previewUrl": url(host, port, f"/view?{query}")}
+    except (OSError, ValueError, KeyError, HTTPError, URLError):
+        pass
+    return {}
+
+
+def status(host, port):
+    info = health(host, port)
+    if not info:
+        state = "foreign-port" if port_open(host, port) else "offline"
+        return {"ok": True, "state": state, "healthy": False, "owned": owned(host, port),
+                "running": 0, "pending": 0, "url": url(host, port)}
+    try:
+        queue = api(host, port, "/queue")
+        running, pending = len(queue.get("queue_running", [])), len(queue.get("queue_pending", []))
+    except (OSError, ValueError, HTTPError, URLError):
+        running = pending = 0
+    state = "generating" if running else "queued" if pending else "idle"
+    return {"ok": True, "state": state, "healthy": True, "owned": owned(host, port),
+            "running": running, "pending": pending, "url": url(host, port), **info, **latest(host, port)}
+
+
+def lock(host, port):
+    handle = (data_dir(True) / f"comfyui-control-{key(host, port)}.lock").open("w")
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    return handle
+
+
+def python_for(root, configured):
+    candidates = [Path(configured)] if configured else [root / "venv/bin/python", root / ".venv/bin/python",
+        root.parent / "venv/bin/python", root.parent / ".venv/bin/python"]
+    return next((item.resolve() for item in candidates if item.is_file() and os.access(item, os.X_OK)), None)
+
+
+def start(args):
+    if args.host.lower() not in {"127.0.0.1", "localhost", "::1"}:
+        return {"ok": False, "state": "error", "message": "Only local servers can be started."}
+    with lock(args.host, args.port):
+        current = status(args.host, args.port)
+        if current["healthy"]:
+            return {**current, "message": "Using the running ComfyUI server."}
+        if current["state"] == "foreign-port":
+            return {**current, "ok": False, "message": "The configured port belongs to another application."}
+        if current["owned"]:
+            return {**current, "state": "starting", "message": "ComfyUI is already starting."}
+        root = Path(args.root).expanduser().resolve() if args.root else None
+        if not root or not (root / "main.py").is_file():
+            return {"ok": False, "state": "error", "message": "Choose the ComfyUI folder containing main.py."}
+        python = python_for(root, args.python)
+        if not python:
+            return {"ok": False, "state": "error", "message": "No ComfyUI Python environment was found."}
+        unit = f"{UNIT_PREFIX}{args.port}-{secrets.token_hex(4)}.service"
+        command = ["systemd-run", "--user", f"--unit={unit}", "--collect", "--quiet",
+                   f"--property=WorkingDirectory={root}", "--", str(python), str(root / "main.py"),
+                   "--listen", args.host, "--port", str(args.port)]
+        result = subprocess.run(command, text=True, capture_output=True)
+        if result.returncode:
+            return {"ok": False, "state": "error", "message": (result.stderr or result.stdout)[:240].strip()}
+        path, temporary = state_path(args.host, args.port), state_path(args.host, args.port).with_suffix(".tmp")
+        temporary.write_text(json.dumps({"unit": unit, "host": args.host, "port": args.port}) + "\n")
+        temporary.chmod(0o600); temporary.replace(path)
+    deadline = time.monotonic() + args.start_timeout
+    while time.monotonic() < deadline:
+        current = status(args.host, args.port)
+        if current["healthy"]:
+            return {**current, "message": "ComfyUI started."}
+        if not unit_active(unit):
+            break
+        time.sleep(.5)
+    return {"ok": False, "state": "error", "owned": unit_active(unit),
+            "message": "ComfyUI did not become ready. Check the service log."}
+
+
+def stop(host, port):
+    with lock(host, port):
+        value = load_state(host, port)
+        if not value:
+            return {"ok": False, "state": "unowned", "message": "This server was not started by ComfyUI Control."}
+        unit = value["unit"]
+        if unit_active(unit):
+            result = subprocess.run(["systemctl", "--user", "stop", unit], text=True, capture_output=True)
+            if result.returncode:
+                return {"ok": False, "state": "error", "message": (result.stderr or result.stdout)[:240].strip()}
+        state_path(host, port).unlink(missing_ok=True)
+    return {"ok": True, "state": "offline", "message": "ComfyUI stopped."}
+
+
+def interrupt(host, port):
+    if not health(host, port):
+        return {"ok": False, "state": "offline", "message": "ComfyUI is not available."}
+    try:
+        api(host, port, "/interrupt", "POST", b"{}")
+        return {"ok": True, "state": "idle", "message": "Interrupt requested."}
+    except (OSError, ValueError, HTTPError, URLError) as error:
+        return {"ok": False, "state": "error", "message": f"Interrupt failed: {error}"[:240]}
+
+
+def exact(connection, count):
+    result = bytearray()
+    while len(result) < count:
+        part = connection.recv(count - len(result))
+        if not part:
+            raise ConnectionError("WebSocket closed")
+        result.extend(part)
+    return bytes(result)
+
+
+def watch(host, port):
+    connection = socket.create_connection((host, port), timeout=5)
+    ws_key = base64.b64encode(secrets.token_bytes(16)).decode()
+    request = (f"GET /ws?clientId={uuid.uuid4().hex} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\n"
+               f"Connection: Upgrade\r\nSec-WebSocket-Key: {ws_key}\r\nSec-WebSocket-Version: 13\r\n\r\n")
+    connection.sendall(request.encode("ascii")); response = bytearray()
+    while b"\r\n\r\n" not in response:
+        response.extend(connection.recv(4096))
+    if not bytes(response).startswith(b"HTTP/1.1 101"):
+        raise ConnectionError("WebSocket upgrade rejected")
+    with connection:
+        while True:
+            first, second = exact(connection, 2); opcode, length = first & 15, second & 127
+            if length == 126: length = struct.unpack("!H", exact(connection, 2))[0]
+            elif length == 127: length = struct.unpack("!Q", exact(connection, 8))[0]
+            payload = exact(connection, length)
+            if opcode == 8: return 0
+            if opcode != 1: continue
+            try: message = json.loads(payload)
+            except (UnicodeDecodeError, ValueError): continue
+            event_type, data = str(message.get("type", "")), message.get("data", {})
+            event = {"type": event_type}
+            if event_type == "progress":
+                event.update(value=int(data.get("value", 0) or 0), max=int(data.get("max", 0) or 0),
+                             node=str(data.get("node", "")), promptId=str(data.get("prompt_id", "")))
+            elif event_type == "executing":
+                event.update(node=str(data.get("node") or ""), promptId=str(data.get("prompt_id", "")))
+            elif event_type == "status":
+                event["queueRemaining"] = int(data.get("status", {}).get("exec_info", {}).get("queue_remaining", 0) or 0)
+            elif event_type in {"execution_error", "execution_interrupted"}:
+                event["message"] = str(data.get("exception_message") or event_type.replace("_", " "))
+            emit(event)
+
+
+def arguments():
+    common = argparse.ArgumentParser(add_help=False); common.add_argument("--host", default="127.0.0.1"); common.add_argument("--port", type=int, default=8188)
+    parser = argparse.ArgumentParser(); commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("status", parents=[common]); launch = commands.add_parser("start", parents=[common])
+    launch.add_argument("--root", default=""); launch.add_argument("--python", default=""); launch.add_argument("--start-timeout", type=float, default=30)
+    commands.add_parser("stop", parents=[common]); commands.add_parser("interrupt", parents=[common]); commands.add_parser("watch", parents=[common])
+    return parser.parse_args()
+
+
+def main():
+    args = arguments()
+    try:
+        if not 1 <= args.port <= 65535: raise ValueError("Port must be between 1 and 65535.")
+        if args.command == "watch": return watch(args.host, args.port)
+        result = status(args.host, args.port) if args.command == "status" else start(args) if args.command == "start" else stop(args.host, args.port) if args.command == "stop" else interrupt(args.host, args.port)
+        emit(result); return 0 if result.get("ok") else 1
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        emit({"ok": False, "state": "error", "message": str(error)[:240]}); return 1
+
+
+if __name__ == "__main__": raise SystemExit(main())

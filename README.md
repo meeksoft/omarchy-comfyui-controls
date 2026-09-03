@@ -5,8 +5,9 @@ server.
 
 ## Status
 
-This repository is an early scaffold. The manifest and panel entry point are in
-place; server control and ComfyUI API integration are the next milestones.
+The first development version includes a themed Omarchy panel, read-only
+ComfyUI status and queue monitoring, live progress events, output previews, and
+a single-instance controller.
 
 ## Planned features
 
@@ -22,9 +23,12 @@ place; server control and ComfyUI API integration are the next milestones.
 
 ## Installation
 
-Installation instructions will be added once the first usable release is
-ready. Omarchy discovers third-party plugins under its user plugin directory;
-normal releases will be installable with `omarchy plugin add`.
+Until the first release, clone the repository and add it as a development copy
+under the Omarchy user plugin directory. Normal releases will be installable
+with `omarchy plugin add`.
+
+The panel can safely attach to an existing server. It only offers **Stop** for
+a server it started itself.
 
 ## Configuration
 
@@ -47,7 +51,21 @@ The plugin ID is `io.github.meeksoft.comfyui`. The display name is
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the initial process and
 API design.
 
+### Controller
+
+The bundled controller has no third-party Python dependencies:
+
+```text
+bin/comfyui-control status [--host HOST] [--port PORT]
+bin/comfyui-control start --root COMFYUI_FOLDER [--python PYTHON]
+bin/comfyui-control stop
+bin/comfyui-control interrupt
+bin/comfyui-control watch
+```
+
+Finite commands print one JSON object. `watch` prints newline-delimited JSON
+events until its WebSocket connection ends.
+
 ## License
 
 MIT
-
