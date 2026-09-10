@@ -40,8 +40,27 @@ process name.
 - `generating`: healthy server with an active prompt
 - `queued`: healthy server with pending work but no active execution
 - `foreign-port`: configured port is occupied by something other than ComfyUI
-- `crashed`: a plugin-managed service exited without a requested stop
+- `crashed`: a plugin-managed unit that failed during the current boot. A
+  reboot (state file boot id mismatch) or a clean stop reads as `offline` and
+  clears the state file; the badge can be acknowledged from the panel until
+  the state changes.
 - `error`: controller or API failure with a user-actionable message
+
+## Progress sources
+
+ComfyUI 0.34+ delivers execution events only to the websocket client that
+submitted the prompt, so a passive watcher receives none. Step progress
+therefore comes from three sources, in order of preference:
+
+1. Watcher `progress` events, when the server broadcasts them (older servers,
+   or prompts submitted without a client id).
+2. tqdm sampler bars from the managed server's streamed log file. The unit is
+   launched with `PYTHONUNBUFFERED=1` and `StandardOutput/StandardError=
+   append:` pointing at a per-endpoint file under the XDG state directory, so
+   `\r`-separated tqdm renders land immediately instead of waiting for a
+   newline (which the journal would require). A file untouched for two minutes
+   reads as stale.
+3. An indeterminate pulsing bar while a job runs without step data.
 
 ## Public-data policy
 

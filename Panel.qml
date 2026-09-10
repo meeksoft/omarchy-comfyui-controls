@@ -7,17 +7,20 @@ import qs.Ui
 
 Panel {
   id: root
-  moduleName: "io.github.meeksoft.comfyui"
-  ipcTarget: "io.github.meeksoft.comfyui"
+  moduleName: "meeksoft.comfyui-control"
+  ipcTarget: "meeksoft.comfyui-control"
   manageIpc: false
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
+  readonly property color active: Color.bar.active
+  readonly property color muted: Color.muted
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property bool alarming: comfy.state === "error" || comfy.state === "foreign-port" || comfy.state === "crashed"
   readonly property color stateColor: alarming ? root.urgent
-    : (comfy.state === "generating" || comfy.state === "queued" ? Color.accent : root.foreground)
+    : (comfy.state === "generating" || comfy.state === "queued" ? root.active
+    : (comfy.healthy ? root.foreground : root.muted))
   property int selectedAction: 0
   property bool cursorActive: false
   property bool previewExpanded: false
@@ -61,6 +64,14 @@ Panel {
     return new Date(milliseconds).toLocaleTimeString(Qt.locale(), "h:mm:ss AP")
   }
   function shortId(value) { return String(value || "").substring(0, 8) }
+  function jobDetail(job) {
+    var parts = []
+    if (Number(job.nodeCount || 0) > 0) parts.push(job.nodeCount + " nodes")
+    if (Number(job.outputNodeCount || 0) > 0) parts.push(job.outputNodeCount + " output nodes")
+    if (Number(job.startedAt || 0) > 0) parts.push("started " + formatClock(Number(job.startedAt)))
+    else if (Number(job.createdAt || 0) > 0) parts.push("queued " + formatClock(Number(job.createdAt)))
+    return parts.join(" · ")
+  }
   function allEvents() { return comfy.recentEvents.concat(comfy.logEvents).slice(0, 30) }
   function eventColor(level) { return level === "error" ? root.urgent : level === "warning" ? Color.accent : root.dim }
   function openOutput(output) { if (output && output.viewUrl) Qt.openUrlExternally(String(output.viewUrl)) }
@@ -70,6 +81,7 @@ Panel {
     else if (comfy.state !== "foreign-port") result.push({ label: "Start ComfyUI", kind: "start" })
     if (comfy.runningCount > 0) result.push({ label: "Interrupt generation", kind: "interrupt" })
     if (comfy.owned) result.push({ label: "Stop managed server", kind: "stop" })
+    if (root.alarming && comfy.acknowledgedState !== comfy.state) result.push({ label: "Dismiss alert", kind: "ack" })
     result.push({ label: "Refresh", kind: "refresh" })
     return result
   }
@@ -81,6 +93,7 @@ Panel {
     else if (kind === "start") comfy.startServer()
     else if (kind === "interrupt") comfy.interrupt()
     else if (kind === "stop") comfy.stopServer()
+    else if (kind === "ack") comfy.acknowledge()
     else comfy.refresh()
   }
 
@@ -108,10 +121,38 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: "C"
-    active: comfy.state === "generating"
-    activeColor: Color.accent
-    foreground: root.alarming ? root.urgent : root.barForeground
+    iconComponent: Component {
+      Item {
+        OpticalGlyph {
+          anchors.fill: parent
+          text: "C"
+          fontFamily: root.fontFamily
+          fontSize: Style.bar.iconFont
+          color: button.active && button.useActiveColor ? button.activeColor : button.foreground
+        }
+        BorderSurface {
+          visible: root.alarming && comfy.acknowledgedState !== comfy.state
+          width: Math.max(7, parent.width * 0.42)
+          height: width
+          radius: width / 2
+          color: root.urgent
+          anchors.right: parent.right
+          anchors.bottom: parent.bottom
+          borderSpec: Border.flat(Color.popups.background, 1)
+          Text {
+            anchors.centerIn: parent
+            text: "!"
+            color: Color.background
+            font.family: Style.font.family
+            font.pixelSize: Math.max(6, parent.height * 0.72)
+            font.bold: true
+          }
+        }
+      }
+    }
+    active: comfy.state === "generating" || comfy.state === "queued"
+    activeColor: root.active
+    foreground: root.alarming ? root.urgent : (comfy.healthy ? root.foreground : root.muted)
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton && comfy.healthy) comfy.openServer()
       else if (buttonCode === Qt.MiddleButton) comfy.refresh()
@@ -146,6 +187,7 @@ Panel {
         else if (text === "p" || text === "P") root.previewExpanded = !root.previewExpanded
         else if (text === "j" || text === "J") root.jobsExpanded = !root.jobsExpanded
         else if (text === "e" || text === "E") root.eventsExpanded = !root.eventsExpanded
+        else if ((text === "a" || text === "A") && root.alarming) comfy.acknowledge()
       }
 
       Flickable {
@@ -167,6 +209,113 @@ Panel {
             meta: root.stateMeta()
             foreground: root.stateColor
             fontFamily: root.fontFamily
+          }
+
+          Column {
+            visible: comfy.state === "generating"
+            width: parent.width
+            spacing: Style.space(6)
+            Item {
+              width: parent.width
+              height: progressLabel.implicitHeight
+              Text {
+                id: progressLabel
+                text: comfy.progressMax > 0
+                  ? (comfy.progressNode !== "" ? "Node " + comfy.progressNode + " · " : "") + Math.round(comfy.progress * 100) + "%"
+                  : "Generating…"
+                color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; anchors.left: parent.left
+              }
+              Text {
+                text: comfy.pendingCount + " queued"; color: root.dim; font.family: root.fontFamily
+                font.pixelSize: Style.font.caption; anchors.right: parent.right
+              }
+            }
+            Rectangle {
+              visible: comfy.progressMax > 0
+              width: parent.width; height: Style.space(5); radius: height / 2
+              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.14)
+              Rectangle {
+                width: parent.width * Math.max(0, Math.min(1, comfy.progress)); height: parent.height
+                radius: parent.radius; color: Color.accent
+                Behavior on width { NumberAnimation { duration: 120 } }
+              }
+            }
+            Rectangle {
+              id: indeterminateBar
+              visible: comfy.progressMax === 0
+              width: parent.width; height: Style.space(5); radius: height / 2
+              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.14)
+              clip: true
+              Rectangle {
+                id: runner
+                width: parent.width * 0.3; height: parent.height
+                radius: height / 2; color: Color.accent
+                NumberAnimation on x {
+                  loops: Animation.Infinite; duration: 1300
+                  from: -runner.width; to: indeterminateBar.width
+                  easing.type: Easing.InOutQuad
+                }
+              }
+            }
+            InfoRow { label: comfy.jobStartExact ? "Started" : "Observed"; value: root.formatClock(comfy.jobStartMs) }
+            InfoRow { label: "Elapsed"; value: root.formatDuration(comfy.elapsedSeconds) }
+            InfoRow { label: "Estimated left"; value: comfy.etaSeconds >= 0 ? "~" + root.formatDuration(comfy.etaSeconds) : "—" }
+          }
+
+          Text {
+            visible: comfy.lastError !== ""; width: parent.width; text: comfy.lastError; color: root.urgent
+            font.family: root.fontFamily; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap
+          }
+          Text {
+            visible: comfy.actionStatus !== ""; width: parent.width; text: comfy.actionStatus; color: root.dim
+            font.family: root.fontFamily; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap
+          }
+
+          PanelSeparator { width: parent.width; foreground: root.foreground }
+
+          Column {
+            visible: comfy.healthy
+            width: parent.width
+            spacing: Style.space(7)
+            InfoRow { label: "Queue"; value: comfy.runningCount + " running · " + comfy.pendingCount + " pending" }
+            InfoRow { label: "Device"; value: comfy.device }
+            InfoRow { label: "VRAM"; value: root.formatBytes(comfy.vramTotal - comfy.vramFree) + " / " + root.formatBytes(comfy.vramTotal) }
+            InfoRow { label: "Ownership"; value: comfy.owned ? "Managed by this plugin" : "External server" }
+          }
+
+          Column {
+            visible: comfy.jobs.length > 0
+            width: parent.width
+            spacing: Style.space(7)
+            Button {
+              width: parent.width; text: (root.jobsExpanded ? "▾  " : "▸  ") + "Jobs  ·  " + comfy.jobs.length
+              bordered: true; foreground: root.foreground; fontFamily: root.fontFamily
+              onClicked: root.jobsExpanded = !root.jobsExpanded
+            }
+            Repeater {
+              model: root.jobsExpanded ? comfy.jobs : []
+              BorderSurface {
+                required property var modelData
+                required property int index
+                width: parent.width; implicitHeight: jobColumn.implicitHeight + Style.space(16)
+                radius: Style.cornerRadius
+                color: Qt.rgba(root.stateColor.r, root.stateColor.g, root.stateColor.b, modelData.state === "running" ? 0.10 : 0.04)
+                Column {
+                  id: jobColumn
+                  anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(8); anchors.rightMargin: Style.space(8); spacing: Style.space(3)
+                  Text {
+                    text: (modelData.state === "running" ? "● Running" : (index + 1) + "  Pending") + "  ·  " + root.shortId(modelData.promptId)
+                    color: modelData.state === "running" ? Color.accent : root.foreground
+                    font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; font.bold: true
+                  }
+                  Text {
+                    text: root.jobDetail(modelData)
+                    color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                  }
+                }
+              }
+            }
           }
 
           Column {
@@ -210,79 +359,17 @@ Panel {
           }
 
           Column {
-            visible: comfy.state === "generating"
             width: parent.width
             spacing: Style.space(6)
-            Item {
-              width: parent.width
-              height: progressLabel.implicitHeight
-              Text {
-                id: progressLabel
-                text: comfy.progressMax > 0 ? "Node " + comfy.progressNode + " · " + Math.round(comfy.progress * 100) + "%" : "Node " + comfy.progressNode
-                color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; anchors.left: parent.left
-              }
-              Text {
-                text: comfy.pendingCount + " queued"; color: root.dim; font.family: root.fontFamily
-                font.pixelSize: Style.font.caption; anchors.right: parent.right
-              }
-            }
-            Rectangle {
-              width: parent.width; height: Style.space(5); radius: height / 2
-              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.14)
-              Rectangle {
-                width: parent.width * Math.max(0, Math.min(1, comfy.progress)); height: parent.height
-                radius: parent.radius; color: Color.accent
-                Behavior on width { NumberAnimation { duration: 120 } }
-              }
-            }
-            InfoRow { label: comfy.jobStartExact ? "Started" : "Observed"; value: root.formatClock(comfy.jobStartMs) }
-            InfoRow { label: "Elapsed"; value: root.formatDuration(comfy.elapsedSeconds) }
-            InfoRow { label: "Estimated left"; value: comfy.etaSeconds >= 0 ? "~" + root.formatDuration(comfy.etaSeconds) : "Calculating…" }
-          }
-
-          PanelSeparator { width: parent.width; foreground: root.foreground }
-
-          Column {
-            visible: comfy.healthy
-            width: parent.width
-            spacing: Style.space(7)
-            InfoRow { label: "Queue"; value: comfy.runningCount + " running · " + comfy.pendingCount + " pending" }
-            InfoRow { label: "Device"; value: comfy.device }
-            InfoRow { label: "VRAM"; value: root.formatBytes(comfy.vramTotal - comfy.vramFree) + " / " + root.formatBytes(comfy.vramTotal) }
-            InfoRow { label: "Ownership"; value: comfy.owned ? "Managed by this plugin" : "External server" }
-          }
-
-          Column {
-            visible: comfy.jobs.length > 0
-            width: parent.width
-            spacing: Style.space(7)
-            Button {
-              width: parent.width; text: (root.jobsExpanded ? "▾  " : "▸  ") + "Jobs  ·  " + comfy.jobs.length
-              bordered: true; foreground: root.foreground; fontFamily: root.fontFamily
-              onClicked: root.jobsExpanded = !root.jobsExpanded
-            }
             Repeater {
-              model: root.jobsExpanded ? comfy.jobs : []
-              BorderSurface {
+              model: root.actions()
+              Button {
                 required property var modelData
                 required property int index
-                width: parent.width; implicitHeight: jobColumn.implicitHeight + Style.space(16)
-                radius: Style.cornerRadius
-                color: Qt.rgba(root.stateColor.r, root.stateColor.g, root.stateColor.b, modelData.state === "running" ? 0.10 : 0.04)
-                Column {
-                  id: jobColumn
-                  anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                  anchors.leftMargin: Style.space(8); anchors.rightMargin: Style.space(8); spacing: Style.space(3)
-                  Text {
-                    text: (modelData.state === "running" ? "● Running" : (index + 1) + "  Pending") + "  ·  " + root.shortId(modelData.promptId)
-                    color: modelData.state === "running" ? Color.accent : root.foreground
-                    font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; font.bold: true
-                  }
-                  Text {
-                    text: modelData.nodeCount + " nodes · " + modelData.outputNodeCount + " output nodes"
-                    color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
-                  }
-                }
+                width: parent.width; text: modelData.label
+                selected: root.cursorActive && index === root.selectedAction; hasCursor: selected
+                bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; enabled: !comfy.busy
+                onClicked: { root.cursorActive = true; root.selectedAction = index; root.activateAction(index) }
               }
             }
           }
@@ -313,31 +400,6 @@ Panel {
                   color: root.eventColor(String(modelData.level || "info")); font.family: root.fontFamily
                   font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap
                 }
-              }
-            }
-          }
-
-          Text {
-            visible: comfy.lastError !== ""; width: parent.width; text: comfy.lastError; color: root.urgent
-            font.family: root.fontFamily; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap
-          }
-          Text {
-            visible: comfy.actionStatus !== ""; width: parent.width; text: comfy.actionStatus; color: root.dim
-            font.family: root.fontFamily; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap
-          }
-
-          Column {
-            width: parent.width
-            spacing: Style.space(6)
-            Repeater {
-              model: root.actions()
-              Button {
-                required property var modelData
-                required property int index
-                width: parent.width; text: modelData.label
-                selected: root.cursorActive && index === root.selectedAction; hasCursor: selected
-                bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; enabled: !comfy.busy
-                onClicked: { root.cursorActive = true; root.selectedAction = index; root.activateAction(index) }
               }
             }
           }

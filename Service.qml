@@ -33,14 +33,21 @@ Item {
   property double lastProgressMs: 0
   property int lastProgressValue: 0
   property real secondsPerStep: 0
+  property int journalEtaSeconds: -1
+  property string prevState: ""
+  property string acknowledgedState: ""
+  property double lastAlarmNotifyMs: Date.now()
+  property double lastFailureNotifyMs: 0
 
   readonly property bool busy: actionProcess.running
   readonly property var latestOutput: outputs.length > 0 ? outputs[0] : ({})
   readonly property real progress: progressMax > 0 ? progressValue / progressMax : 0
   readonly property int elapsedSeconds: jobStartMs > 0 ? Math.max(0, Math.floor((nowMs - jobStartMs) / 1000)) : 0
   readonly property int nodeElapsedSeconds: nodeStartMs > 0 ? Math.max(0, Math.floor((nowMs - nodeStartMs) / 1000)) : 0
-  readonly property int etaSeconds: secondsPerStep > 0 && progressMax > progressValue
-    ? Math.max(0, Math.round(secondsPerStep * (progressMax - progressValue))) : -1
+  readonly property int etaSeconds: lastProgressMs > 0 && nowMs - lastProgressMs < 5000
+    ? (secondsPerStep > 0 && progressMax > progressValue
+       ? Math.max(0, Math.round(secondsPerStep * (progressMax - progressValue))) : -1)
+    : journalEtaSeconds
   readonly property string helperPath: decodeURIComponent(Qt.resolvedUrl("bin/comfyui-control").toString().replace(/^file:\/\//, ""))
   readonly property string host: stringSetting("host", "127.0.0.1")
   readonly property int port: intSetting("port", 8188, 1, 65535)
@@ -87,6 +94,7 @@ Item {
     try { parsed = JSON.parse(String(raw || "{}")) }
     catch (error) { lastError = "Could not understand the controller response."; return }
     state = String(parsed.state || "error"); healthy = parsed.healthy === true; owned = parsed.owned === true
+    if (state !== acknowledgedState) acknowledgedState = ""
     runningCount = Number(parsed.running || 0); pendingCount = Number(parsed.pending || 0)
     version = String(parsed.version || ""); device = String(parsed.device || "")
     vramTotal = Number(parsed.vramTotal || 0); vramFree = Number(parsed.vramFree || 0)
@@ -94,14 +102,31 @@ Item {
     recentEvents = parsed.recentEvents || []; logEvents = parsed.logEvents || []
     serverUrl = String(parsed.url || ("http://" + host + ":" + port))
     previewUrl = outputs.length > 0 ? String(outputs[0].viewUrl || "") : ""
-    if (state === "generating" && jobStartMs === 0) {
-      jobStartMs = Date.now(); jobStartExact = false
+    if (state === "generating") {
+      var runningJob = null
+      for (var i = 0; i < jobs.length; i++)
+        if (jobs[i].state === "running") { runningJob = jobs[i]; break }
+      var exactStart = runningJob ? Number(runningJob.startedAt || 0) : 0
+      if (exactStart > 0) { jobStartMs = exactStart; jobStartExact = true }
+      else if (jobStartMs === 0) { jobStartMs = Date.now(); jobStartExact = false }
+      var watcherFresh = lastProgressMs > 0 && Date.now() - lastProgressMs < 5000
+      if (watcherFresh) journalEtaSeconds = -1
+      else if (parsed.progress && Number(parsed.progress.max || 0) > 0) {
+        progressNode = ""
+        progressValue = Number(parsed.progress.value || 0)
+        progressMax = Number(parsed.progress.max || 0)
+        journalEtaSeconds = Number(parsed.progress.etaSeconds || -1)
+      } else {
+        progressNode = ""; progressValue = 0; progressMax = 0; journalEtaSeconds = -1
+      }
     } else if (state !== "generating") {
       progressNode = ""; progressValue = 0; progressMax = 0
       jobStartMs = 0; nodeStartMs = 0; secondsPerStep = 0; lastProgressMs = 0; lastProgressValue = 0
+      journalEtaSeconds = -1
     }
     if (parsed.ok === false) lastError = String(parsed.message || "Controller error")
     else if (state !== "error" && state !== "foreign-port") lastError = ""
+    checkAlarmNotify(); prevState = state
     updateWatcher()
   }
   function applyEvent(raw) {
@@ -138,12 +163,35 @@ Item {
       recentEvents = [{ level: event.type === "execution_error" ? "error" : "warning",
                         kind: event.type, timestamp: Number(event.timestamp || Date.now()),
                         promptId: String(event.promptId || ""), message: lastError }].concat(recentEvents).slice(0, 20)
+      if (event.type === "execution_error" && Date.now() - lastFailureNotifyMs > 600000) {
+        lastFailureNotifyMs = Date.now()
+        notify("normal", "ComfyUI generation failed", lastError !== "" ? lastError.slice(0, 200) : "A queued prompt failed.")
+      }
       refreshSoon.restart()
     }
   }
   function updateWatcher() {
     if (healthy && !watchProcess.running) { watchProcess.command = commonArgs("watch"); watchProcess.running = true }
     else if (!healthy && watchProcess.running) watchProcess.running = false
+  }
+  function notify(urgency, summary, body) {
+    if (notifyProcess.running) return
+    notifyProcess.command = ["notify-send", "-u", urgency, "-a", "ComfyUI Control", summary, body]
+    notifyProcess.running = true
+  }
+  function acknowledge() { acknowledgedState = state }
+  function checkAlarmNotify() {
+    if (state !== "error" && state !== "crashed") return
+    if (state === acknowledgedState) return
+    var now = Date.now()
+    var transition = prevState !== "" && prevState !== "checking" && prevState !== state
+    if (transition || now - lastAlarmNotifyMs > 600000) {
+      lastAlarmNotifyMs = now
+      if (state === "crashed")
+        notify("critical", "ComfyUI server stopped", "The managed server exited unexpectedly. Open the panel and check Events.")
+      else
+        notify("critical", "ComfyUI needs attention", lastError !== "" ? lastError : "The controller reported an error.")
+    }
   }
 
   Timer { interval: root.refreshIntervalSec * 1000; repeat: true; running: true; triggeredOnStart: true; onTriggered: root.refresh() }
@@ -174,4 +222,5 @@ Item {
     stdout: SplitParser { onRead: function(data) { root.applyEvent(data) } }
     onExited: function(exitCode) { if (root.healthy) reconnectTimer.restart() }
   }
+  Process { id: notifyProcess; command: [] }
 }

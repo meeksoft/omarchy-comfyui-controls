@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.meeksoft.comfyui",
+  "id": "meeksoft.comfyui-control",
   "name": "ComfyUI Control",
   "version": "0.0.2",
   "author": "Meeksoft",

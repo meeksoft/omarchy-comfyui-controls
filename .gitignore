@@ -1,5 +1,6 @@
-.cache/
-.tmp/
+# Python environments, bytecode, and tooling caches
+.venv/
+venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -7,17 +8,40 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
-.venv/
-venv/
+
+# Build and package output
+build/
+dist/
+*.egg-info/
+
+# Runtime state, generated previews, and logs
+.cache/
+.tmp/
+*.log
+*.pid
+*.tmp
+*.bak
+
+# Local configuration and credentials
 .env
 .env.*
 !.env.example
+config.local.json
+*.local
+auth.json
+credentials*
+secrets*
+*.token
+*.key
+*.pem
+
+# Agent and editor tooling
+.claude/
 .idea/
 .vscode/
+*.swp
+*.swo
+
+# Operating-system metadata
 .DS_Store
 Thumbs.db
-*.log
-*.pid
-*.bak
-*.local
-config.local.json

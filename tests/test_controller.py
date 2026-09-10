@@ -5,6 +5,7 @@ import importlib.util
 import importlib.machinery
 import os
 import re
+import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -66,6 +67,25 @@ class SlowComfyHandler(ComfyHandler):
             self.reply({})
         else:
             self.send_error(404)
+
+
+class JobsApiHandler(ComfyHandler):
+    """Serves the /api/jobs endpoint and a /queue carrying node details."""
+
+    def do_GET(self):
+        if self.path.startswith("/api/jobs"):
+            self.reply({"jobs": [
+                {"id": "aaaaaaaa-1111-1111-1111-111111111111", "status": "in_progress",
+                 "priority": 7, "create_time": 1000, "execution_start_time": 2000},
+                {"id": "bbbbbbbb-2222-2222-2222-222222222222", "status": "pending",
+                 "priority": 8, "create_time": 1500},
+            ], "pagination": {}})
+        elif self.path == "/queue":
+            self.reply({"queue_running": [[7, "aaaaaaaa-1111-1111-1111-111111111111",
+                                           {"n1": {}, "n2": {}}, {}, ["o1", "o2"]]],
+                        "queue_pending": []})
+        else:
+            ComfyHandler.do_GET(self)
 
 
 class QuietHTTPServer(ThreadingHTTPServer):
@@ -153,6 +173,57 @@ class ControllerTests(unittest.TestCase):
         finally:
             listener.close()
 
+    def test_jobs_api_enriches_running_job(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), JobsApiHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            value = self.run_status(server.server_port)
+            self.assertEqual("generating", value["state"])
+            self.assertEqual(1, value["running"])
+            self.assertEqual(1, value["pending"])
+            job = value["jobs"][0]
+            self.assertEqual("running", job["state"])
+            self.assertEqual(2, job["nodeCount"])
+            self.assertEqual(2, job["outputNodeCount"])
+            self.assertEqual(2000, job["startedAt"])
+            self.assertEqual("aaaaaaaa", job["promptId"][:8])
+            self.assertEqual(1, value["jobs"][1]["position"])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_parse_progress_uses_last_tqdm_chunk(self):
+        controller = load_controller()
+        text = " 25%|##| 10/40 [00:02<00:06, 5.00it/s]\r 50%|##| 20/40 [00:03<00:04, 5.00it/s]"
+        self.assertEqual({"value": 20, "max": 40, "etaSeconds": 4}, controller.parse_progress(text))
+
+    def test_parse_progress_derives_eta_from_rate_without_estimate(self):
+        controller = load_controller()
+        self.assertEqual(145, controller.parse_progress("  3%|   | 1/30 [00:05, 5.00s/it]")["etaSeconds"])
+
+    def test_parse_progress_matches_unicode_bar_chunks(self):
+        controller = load_controller()
+        text = " 92%|████████████████████████████████████████| 37/40 [11:17<00:55, 18.52s/it]"
+        self.assertEqual({"value": 37, "max": 40, "etaSeconds": 55}, controller.parse_progress(text))
+
+    def test_parse_progress_accepts_unknown_rate_bars(self):
+        controller = load_controller()
+        text = "  0%|          | 0/40 [00:00<?, ?it/s]"
+        self.assertEqual({"value": 0, "max": 40, "etaSeconds": -1}, controller.parse_progress(text))
+
+    def test_log_progress_reads_fresh_file_and_ignores_stale(self):
+        controller = load_controller()
+        with tempfile.TemporaryDirectory() as base:
+            with patch.dict(controller.os.environ, {"XDG_STATE_HOME": base}):
+                log = controller.server_log_path("127.0.0.1", 8188)
+                log.parent.mkdir(parents=True, exist_ok=True)
+                log.write_text(" 50%|##| 20/40 [00:03<00:04, 5.00it/s]\n")
+                self.assertEqual(20, controller.log_progress("127.0.0.1", 8188)["value"])
+                stale = time.time() - 300
+                os.utime(log, (stale, stale))
+                self.assertIsNone(controller.log_progress("127.0.0.1", 8188))
+
     def test_reports_offline(self):
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))
@@ -164,13 +235,73 @@ class ControllerTests(unittest.TestCase):
         controller = load_controller()
         with patch.object(controller, "health", return_value=None), \
              patch.object(controller, "port_open", return_value=False), \
-             patch.object(controller, "load_state", return_value={"unit": "omarchy-comfyui-test.service"}), \
+             patch.object(controller, "load_state", return_value={"unit": "omarchy-comfyui-test.service", "boot": "boot-1"}), \
+             patch.object(controller, "unit_result", return_value="exit-code"), \
+             patch.object(controller, "current_boot", return_value="boot-1"), \
              patch.object(controller, "owned", return_value=False), \
              patch.object(controller, "log_summary", return_value=[]), \
              patch.object(controller, "journal_summary", return_value=[{"level": "error", "message": "stopped"}]):
             value = controller.status("127.0.0.1", 8188)
         self.assertEqual("crashed", value["state"])
         self.assertEqual("stopped", value["logEvents"][0]["message"])
+
+    def test_rebooted_server_reads_offline_and_clears_state(self):
+        controller = load_controller()
+        with tempfile.TemporaryDirectory() as base:
+            with patch.dict(controller.os.environ, {"XDG_STATE_HOME": base}):
+                controller.save_state("127.0.0.1", 8189, "omarchy-comfyui-old.service")
+                with patch.object(controller, "health", return_value=None), \
+                     patch.object(controller, "port_open", return_value=False), \
+                     patch.object(controller, "current_boot", return_value="boot-2"), \
+                     patch.object(controller, "owned", return_value=False), \
+                     patch.object(controller, "log_summary", return_value=[]), \
+                     patch.object(controller, "journal_summary", return_value=[]):
+                    value = controller.status("127.0.0.1", 8189)
+                self.assertEqual("offline", value["state"])
+                self.assertFalse(controller.state_path("127.0.0.1", 8189).exists())
+
+    def test_cleanly_stopped_server_reads_offline(self):
+        controller = load_controller()
+        with patch.object(controller, "health", return_value=None), \
+             patch.object(controller, "port_open", return_value=False), \
+             patch.object(controller, "load_state", return_value={"unit": "omarchy-comfyui-test.service", "boot": "boot-1"}), \
+             patch.object(controller, "unit_result", return_value="success"), \
+             patch.object(controller, "current_boot", return_value="boot-1"), \
+             patch.object(controller, "owned", return_value=False), \
+             patch.object(controller, "log_summary", return_value=[]), \
+             patch.object(controller, "journal_summary", return_value=[]):
+            value = controller.status("127.0.0.1", 8188)
+        self.assertEqual("offline", value["state"])
+
+    def test_save_state_records_boot_id(self):
+        controller = load_controller()
+        with tempfile.TemporaryDirectory() as base:
+            with patch.dict(controller.os.environ, {"XDG_STATE_HOME": base}), \
+                 patch.object(controller, "current_boot", return_value="boot-42"):
+                controller.save_state("127.0.0.1", 8187, "omarchy-comfyui-x.service")
+                self.assertEqual("boot-42", controller.load_state("127.0.0.1", 8187)["boot"])
+
+    def test_python_for_keeps_venv_entrypoint_not_symlink_target(self):
+        controller = load_controller()
+        with tempfile.TemporaryDirectory() as base:
+            root = Path(base) / "comfyui"
+            root.mkdir()
+            bin_dir = Path(base) / "venv" / "bin"
+            bin_dir.mkdir(parents=True)
+            venv_python = bin_dir / "python"
+            venv_python.symlink_to(Path(sys.executable))
+            self.assertEqual(venv_python, controller.python_for(root, ""))
+            self.assertNotEqual(Path(sys.executable), controller.python_for(root, ""))
+
+    def test_python_for_prefers_configured_interpreter(self):
+        controller = load_controller()
+        with tempfile.TemporaryDirectory() as base:
+            root = Path(base) / "comfyui"
+            root.mkdir()
+            wrapper = Path(base) / "wrapper-python"
+            wrapper.write_text("#!/bin/sh\nexec python3 \"$@\"\n")
+            wrapper.chmod(0o755)
+            self.assertEqual(wrapper, controller.python_for(root, str(wrapper)))
 
     def test_does_not_launch_again_while_managed_server_starts(self):
         controller = load_controller()
