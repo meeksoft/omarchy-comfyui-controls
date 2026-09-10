@@ -7,8 +7,8 @@ import qs.Ui
 
 Panel {
   id: root
-  moduleName: "meeksoft.comfyui-control"
-  ipcTarget: "meeksoft.comfyui-control"
+  moduleName: "meeksoft.comfyui-controls"
+  ipcTarget: "meeksoft.comfyui-controls"
   manageIpc: false
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground

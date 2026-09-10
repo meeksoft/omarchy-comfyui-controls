@@ -41,8 +41,8 @@ Until the first release, add the repository as a development copy under the
 Omarchy user plugin directory. From the repository root:
 
 ```bash
-ln -s "$PWD" "$HOME/.config/omarchy/plugins/meeksoft.comfyui-control"
-omarchy plugin enable meeksoft.comfyui-control
+ln -s "$PWD" "$HOME/.config/omarchy/plugins/meeksoft.comfyui-controls"
+omarchy plugin enable meeksoft.comfyui-controls
 omarchy restart shell
 ```
 
@@ -100,14 +100,14 @@ for the entire workflow.
 If installed from Git, use Omarchy's standard removal command:
 
 ```bash
-omarchy plugin remove meeksoft.comfyui-control
+omarchy plugin remove meeksoft.comfyui-controls
 ```
 
 For a local development link, disable the plugin and unlink that exact path:
 
 ```bash
-omarchy plugin disable meeksoft.comfyui-control
-unlink "$HOME/.config/omarchy/plugins/meeksoft.comfyui-control"
+omarchy plugin disable meeksoft.comfyui-controls
+unlink "$HOME/.config/omarchy/plugins/meeksoft.comfyui-controls"
 omarchy restart shell
 ```
 
@@ -115,7 +115,7 @@ Stopping the plugin does not stop a ComfyUI server you started yourself.
 
 ## Development
 
-The plugin ID is `meeksoft.comfyui-control`. The display name is
+The plugin ID is `meeksoft.comfyui-controls`. The display name is
 **ComfyUI Control**, while the compact bar label is **ComfyUI**.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the initial process and

@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "id": "meeksoft.comfyui-control",
+  "id": "meeksoft.comfyui-controls",
   "name": "ComfyUI Control",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "author": "Meeksoft",
   "license": "MIT",
   "description": "Start, monitor, and open one local ComfyUI server from the Omarchy bar.",
