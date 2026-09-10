@@ -32,7 +32,8 @@ ComfyUI 0.34 or newer is recommended. See [Progress reporting](#progress-reporti
 - Keep output previews collapsed by default and show output metadata on demand.
 - Surface recent execution failures and optionally summarize an external log.
 - Open ComfyUI in the default browser.
-- Stop only the server instance managed by this plugin.
+- Stop a running server: through its systemd unit when this plugin started
+  it, otherwise by signalling the process holding the configured port.
 - Surface useful startup diagnostics without exposing private configuration.
 
 ## Install from a local checkout
@@ -77,7 +78,12 @@ The controller refuses to start a server on any host other than `127.0.0.1`,
 ## Usage
 
 The panel refreshes on its configured interval. It can safely attach to an
-existing server, and only offers **Stop** for a server it started itself.
+existing server. **Stop** ends a server this plugin started through its
+systemd unit; for any other healthy ComfyUI on a loopback port it signals the
+process holding that port, so a server started from a terminal can be stopped
+too. The action is labelled **Stop managed server** in the first case and
+**Stop ComfyUI server** in the second. A remote host, or a port that does not
+answer as ComfyUI, is refused rather than signalled.
 
 When the panel is focused, press `P` to expand the latest output, `J` to toggle
 the jobs list, `E` to toggle diagnostics, `R` to refresh, `O` to open ComfyUI,
@@ -111,7 +117,12 @@ unlink "$HOME/.config/omarchy/plugins/meeksoft.comfyui-controls"
 omarchy restart shell
 ```
 
-Stopping the plugin does not stop a ComfyUI server you started yourself.
+Removing the plugin does not stop a running ComfyUI server; stop it from the
+panel first if you want it gone.
+
+`omarchy plugin remove` also deletes this plugin's entry from
+`~/.config/omarchy/shell.json`, and with it the configured ComfyUI folder,
+Python path, and log path. Copy those out first if you plan to reinstall.
 
 ## Development
 

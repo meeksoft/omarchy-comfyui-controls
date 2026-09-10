@@ -85,7 +85,7 @@ Item {
     command.push("--python", String(setting("pythonPath", "")))
     runAction(command, "Starting ComfyUI…")
   }
-  function stopServer() { if (owned) runAction(commonArgs("stop"), "Stopping ComfyUI…") }
+  function stopServer() { if (owned || healthy) runAction(commonArgs("stop"), "Stopping ComfyUI…") }
   function interrupt() { if (healthy && runningCount > 0) runAction(commonArgs("interrupt"), "Requesting interrupt…") }
   function openServer() { if (healthy && serverUrl !== "") Qt.openUrlExternally(serverUrl) }
 

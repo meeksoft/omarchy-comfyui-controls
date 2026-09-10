@@ -233,7 +233,11 @@ class ControllerTests(unittest.TestCase):
 
     def test_reports_stopped_managed_server_as_crashed(self):
         controller = load_controller()
-        with patch.object(controller, "health", return_value=None), \
+        # Isolated for the same reason as the clean-stop case: stale_unit can
+        # unlink the real state file for this host and port.
+        with tempfile.TemporaryDirectory() as base, \
+             patch.dict(controller.os.environ, {"XDG_STATE_HOME": base}), \
+             patch.object(controller, "health", return_value=None), \
              patch.object(controller, "port_open", return_value=False), \
              patch.object(controller, "load_state", return_value={"unit": "omarchy-comfyui-test.service", "boot": "boot-1"}), \
              patch.object(controller, "unit_result", return_value="exit-code"), \
@@ -260,9 +264,67 @@ class ControllerTests(unittest.TestCase):
                 self.assertEqual("offline", value["state"])
                 self.assertFalse(controller.state_path("127.0.0.1", 8189).exists())
 
+    def test_running_unit_keeps_its_ownership_record(self):
+        """Regression: systemd reports Result=success for a service that is
+        still running, so classifying on Result alone cleared the state file
+        of a server seconds after starting it — and the panel gates Stop on
+        that record, so Stop never appeared for a server it had started."""
+        controller = load_controller()
+        with tempfile.TemporaryDirectory() as base:
+            with patch.dict(controller.os.environ, {"XDG_STATE_HOME": base}):
+                controller.save_state("127.0.0.1", 8190, "omarchy-comfyui-live.service")
+                with patch.object(controller, "unit_active", return_value=True), \
+                     patch.object(controller, "unit_result", return_value="success"), \
+                     patch.object(controller, "current_boot", return_value=controller.current_boot()):
+                    self.assertIsNone(controller.stale_unit("127.0.0.1", 8190))
+                    self.assertTrue(controller.state_path("127.0.0.1", 8190).exists())
+                    self.assertTrue(controller.owned("127.0.0.1", 8190))
+
+    def test_stops_a_server_it_did_not_start(self):
+        """An unowned but healthy loopback server is stopped by signalling the
+        process holding its port, rather than refused."""
+        controller = load_controller()
+        with tempfile.TemporaryDirectory() as base:
+            with patch.dict(controller.os.environ, {"XDG_STATE_HOME": base}):
+                with patch.object(controller, "health", return_value={"version": "0.34"}), \
+                     patch.object(controller, "listener_pid", return_value=4321) as resolved, \
+                     patch.object(controller, "terminate", return_value=True) as killed:
+                    value = controller.stop("127.0.0.1", 8188)
+                resolved.assert_called_once_with("127.0.0.1", 8188)
+                killed.assert_called_once_with(4321)
+        self.assertTrue(value["ok"])
+        self.assertEqual("offline", value["state"])
+
+    def test_refuses_to_stop_a_port_that_is_not_comfyui(self):
+        controller = load_controller()
+        with tempfile.TemporaryDirectory() as base:
+            with patch.dict(controller.os.environ, {"XDG_STATE_HOME": base}):
+                with patch.object(controller, "health", return_value=None), \
+                     patch.object(controller, "terminate") as killed:
+                    value = controller.stop("127.0.0.1", 8188)
+                killed.assert_not_called()
+        self.assertFalse(value["ok"])
+        self.assertEqual("unowned", value["state"])
+
+    def test_refuses_to_stop_a_remote_server(self):
+        controller = load_controller()
+        with tempfile.TemporaryDirectory() as base:
+            with patch.dict(controller.os.environ, {"XDG_STATE_HOME": base}):
+                with patch.object(controller, "terminate") as killed:
+                    value = controller.stop("192.168.1.50", 8188)
+                killed.assert_not_called()
+        self.assertFalse(value["ok"])
+        self.assertEqual("unowned", value["state"])
+
     def test_cleanly_stopped_server_reads_offline(self):
         controller = load_controller()
-        with patch.object(controller, "health", return_value=None), \
+        # Redirect XDG_STATE_HOME: stale_unit unlinks the state file for this
+        # host and port, and the default 127.0.0.1:8188 is the one a real
+        # install uses, so an unredirected run deletes the user's own
+        # ownership record and silently un-owns their running server.
+        with tempfile.TemporaryDirectory() as base, \
+             patch.dict(controller.os.environ, {"XDG_STATE_HOME": base}), \
+             patch.object(controller, "health", return_value=None), \
              patch.object(controller, "port_open", return_value=False), \
              patch.object(controller, "load_state", return_value={"unit": "omarchy-comfyui-test.service", "boot": "boot-1"}), \
              patch.object(controller, "unit_result", return_value="success"), \
@@ -310,7 +372,9 @@ class ControllerTests(unittest.TestCase):
         })()
         starting = {"ok": True, "state": "offline", "healthy": False, "owned": True,
                     "running": 0, "pending": 0}
-        with patch.object(controller, "lock", return_value=nullcontext()), \
+        with tempfile.TemporaryDirectory() as base, \
+             patch.dict(controller.os.environ, {"XDG_STATE_HOME": base}), \
+             patch.object(controller, "lock", return_value=nullcontext()), \
              patch.object(controller, "status", return_value=starting), \
              patch.object(controller.subprocess, "run") as run:
             result = controller.start(args)

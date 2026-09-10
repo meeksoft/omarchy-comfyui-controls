@@ -28,9 +28,12 @@ Starting the server must follow this sequence:
    unit name and record its ownership in the user's XDG state directory.
 6. Verify ComfyUI becomes healthy before reporting `started`.
 
-Stopping must affect only a process started and tracked by the controller. The
-plugin must never kill an arbitrary process based solely on a matching port or
-process name.
+Stopping prefers the systemd unit the controller started and recorded. A server
+the controller did not start can still be stopped, but only after two checks
+pass: the host is loopback, and the port answers `/system_stats` as ComfyUI.
+The listener is then resolved to a pid the current user can signal, and gets
+SIGTERM with a grace period before SIGKILL. A matching port or process name is
+never sufficient on its own, and a remote host is always refused.
 
 ## State model
 

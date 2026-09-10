@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Dependency-free lifecycle and status helper for ComfyUI Control."""
 
-import argparse, base64, fcntl, hashlib, json, os, re, secrets, socket, struct, subprocess, time, uuid
+import argparse, base64, fcntl, hashlib, json, os, re, secrets, signal, socket, struct, subprocess, time, uuid
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 UNIT_PREFIX = "omarchy-comfyui-"
+LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
 
 def emit(value):
@@ -353,7 +354,7 @@ def python_for(root, configured):
 
 
 def start(args):
-    if args.host.lower() not in {"127.0.0.1", "localhost", "::1"}:
+    if args.host.lower() not in LOOPBACK:
         return {"ok": False, "state": "error", "message": "Only local servers can be started."}
     with lock(args.host, args.port):
         current = status(args.host, args.port, args.log_path)
@@ -401,17 +402,75 @@ def start(args):
             "message": "ComfyUI did not become ready. Check the service log."}
 
 
+def listener_pid(host, port):
+    """PID of this user's process listening on a loopback port, else None.
+
+    Used only to stop a server this plugin did not start, so it deliberately
+    refuses anything it cannot verify: non-loopback hosts, and processes this
+    user cannot signal. os.kill(pid, 0) is the ownership probe.
+    """
+    if host.lower() not in LOOPBACK: return None
+    result = subprocess.run(["ss", "-H", "-tlnp", f"sport = :{port}"], text=True, capture_output=True)
+    if result.returncode: return None
+    for match in re.finditer(r"pid=(\d+)", result.stdout):
+        pid = int(match.group(1))
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            continue
+        return pid
+    return None
+
+
+def terminate(pid, timeout=10.0):
+    """SIGTERM, escalating to SIGKILL only if the process outlives the grace
+    period. ComfyUI writes its queue state on the way down, so it is always
+    given the chance to exit cleanly first."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return True
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(0.2)
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return True
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+    return True
+
+
 def stop(host, port):
     with lock(host, port):
         value = load_state(host, port)
-        if not value:
-            return {"ok": False, "state": "unowned", "message": "This server was not started by ComfyUI Control."}
-        unit = value["unit"]
-        if unit_active(unit):
-            result = subprocess.run(["systemctl", "--user", "stop", unit], text=True, capture_output=True)
-            if result.returncode:
-                return {"ok": False, "state": "error", "message": (result.stderr or result.stdout)[:240].strip()}
-        state_path(host, port).unlink(missing_ok=True)
+        if value:
+            unit = value["unit"]
+            if unit_active(unit):
+                result = subprocess.run(["systemctl", "--user", "stop", unit], text=True, capture_output=True)
+                if result.returncode:
+                    return {"ok": False, "state": "error", "message": (result.stderr or result.stdout)[:240].strip()}
+            state_path(host, port).unlink(missing_ok=True)
+            return {"ok": True, "state": "offline", "message": "ComfyUI stopped."}
+
+        # No state file: a server this plugin did not start. Stopping it is
+        # still allowed, but only once the port has answered as ComfyUI and
+        # the listener resolves to a process this user can signal, so a stray
+        # listener is never killed on a guess.
+        if host.lower() not in LOOPBACK:
+            return {"ok": False, "state": "unowned",
+                    "message": "Only a ComfyUI server on this machine can be stopped."}
+        if not health(host, port):
+            return {"ok": False, "state": "unowned",
+                    "message": "No ComfyUI server is answering on this port."}
+        pid = listener_pid(host, port)
+        if pid is None:
+            return {"ok": False, "state": "unowned",
+                    "message": "Could not identify the ComfyUI process to stop."}
+        terminate(pid)
     return {"ok": True, "state": "offline", "message": "ComfyUI stopped."}
 
 

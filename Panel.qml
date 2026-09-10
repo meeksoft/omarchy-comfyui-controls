@@ -91,7 +91,11 @@ Panel {
     if (comfy.healthy) result.push({ label: "Open ComfyUI", kind: "open" })
     else if (comfy.state !== "foreign-port" && comfy.state !== "starting") result.push({ label: "Start ComfyUI", kind: "start" })
     if (comfy.runningCount > 0) result.push({ label: "Interrupt generation", kind: "interrupt" })
+    // A server this plugin started is stopped through its systemd unit; any
+    // other healthy local server is stopped by signalling its listener. The
+    // labels differ so the action never understates what it will end.
     if (comfy.owned) result.push({ label: "Stop managed server", kind: "stop" })
+    else if (comfy.healthy) result.push({ label: "Stop ComfyUI server", kind: "stop" })
     if (root.alarming && comfy.acknowledgedState !== comfy.state) result.push({ label: "Dismiss alert", kind: "ack" })
     result.push({ label: "Refresh", kind: "refresh" })
     return result
