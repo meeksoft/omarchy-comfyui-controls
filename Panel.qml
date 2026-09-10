@@ -11,6 +11,15 @@ Panel {
   ipcTarget: "meeksoft.comfyui-controls"
   manageIpc: false
 
+  // The bar instantiates this panel once per monitor, so an IpcHandler
+  // declared here would register the same target from every instance and only
+  // the first would win, leaving the IPC surface owned by whichever screen
+  // happened to load first. Elect one instance instead. Both sides rebind if
+  // a monitor is added or removed, so the handler follows the surviving head.
+  readonly property var panelScreen: root.QsWindow.window ? root.QsWindow.window.screen : null
+  readonly property bool ipcOwner: !!panelScreen && Quickshell.screens.length > 0
+    && panelScreen.name === Quickshell.screens[0].name
+
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color active: Color.bar.active
@@ -109,6 +118,7 @@ Panel {
   Service { id: comfy; settings: root.settings }
 
   IpcHandler {
+    enabled: root.ipcOwner
     target: root.ipcTarget
     function open(): void { root.open() }
     function close(): void { root.close() }
