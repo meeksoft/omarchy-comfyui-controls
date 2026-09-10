@@ -32,6 +32,7 @@ Panel {
 
   function stateTitle() {
     if (comfy.state === "checking") return "Checking…"
+    if (comfy.state === "starting") return "Starting…"
     if (comfy.state === "offline") return "Offline"
     if (comfy.state === "foreign-port") return "Port unavailable"
     if (comfy.state === "crashed") return "Server stopped unexpectedly"
@@ -42,6 +43,7 @@ Panel {
   }
   function stateMeta() {
     if (comfy.healthy) return "ComfyUI " + comfy.version + (comfy.pendingCount > 0 ? " · " + comfy.pendingCount + " queued" : "")
+    if (comfy.state === "starting") return "Waiting for the server to answer"
     if (comfy.state === "foreign-port") return "Another application owns the configured port"
     if (comfy.state === "crashed") return "Review Events for the last server messages"
     return comfy.serverUrl
@@ -78,7 +80,7 @@ Panel {
   function actions() {
     var result = []
     if (comfy.healthy) result.push({ label: "Open ComfyUI", kind: "open" })
-    else if (comfy.state !== "foreign-port") result.push({ label: "Start ComfyUI", kind: "start" })
+    else if (comfy.state !== "foreign-port" && comfy.state !== "starting") result.push({ label: "Start ComfyUI", kind: "start" })
     if (comfy.runningCount > 0) result.push({ label: "Interrupt generation", kind: "interrupt" })
     if (comfy.owned) result.push({ label: "Stop managed server", kind: "stop" })
     if (root.alarming && comfy.acknowledgedState !== comfy.state) result.push({ label: "Dismiss alert", kind: "ack" })

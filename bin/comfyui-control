@@ -109,6 +109,11 @@ def stale_unit(host, port):
     their state files are cleared."""
     value = load_state(host, port)
     if not value: return None
+    # A running unit is never stale, whatever its Result says: systemd reports
+    # Result=success for a healthy service, so falling through to the clear
+    # below would discard ownership of a server that is merely still coming
+    # up — and with it the panel's only Stop action.
+    if unit_active(value["unit"]): return None
     if value.get("boot") and value.get("boot") != current_boot():
         state_path(host, port).unlink(missing_ok=True)
         return None
@@ -306,8 +311,12 @@ def status(host, port, log_path=""):
     occupied = info is None and port_open(host, port)
     if info is None and occupied: info = health(host, port, 5.0)
     if not info:
-        state = "foreign-port" if occupied else stale_unit(host, port) or "offline"
-        return {"ok": True, "state": state, "healthy": False, "owned": owned(host, port),
+        # A unit of ours that is up but not yet answering is starting, not
+        # offline — and the port it has already bound is ours, so this has to
+        # outrank the foreign-port reading that half-open socket would give.
+        mine = owned(host, port)
+        state = "starting" if mine else ("foreign-port" if occupied else stale_unit(host, port) or "offline")
+        return {"ok": True, "state": state, "healthy": False, "owned": mine,
                 "running": 0, "pending": 0, "jobs": [], "outputs": [], "recentEvents": [],
                 "logEvents": (log_summary(log_path) + journal_summary(host, port))[:30], "url": url(host, port)}
     try:
@@ -362,7 +371,10 @@ def start(args):
             return {"ok": False, "state": "error", "message": "No ComfyUI Python environment was found."}
         unit = f"{UNIT_PREFIX}{args.port}-{secrets.token_hex(4)}.service"
         server_log = server_log_path(args.host, args.port)
+        # The server log can echo prompts and paths, so keep it as private as
+        # the state files beside it rather than at the process umask.
         with server_log.open("w"): pass
+        server_log.chmod(0o600)
         # No --collect: a failed unit must survive so its Result stays readable
         # for crash classification; clean stops unload on their own.
         command = ["systemd-run", "--user", f"--unit={unit}", "--quiet",
