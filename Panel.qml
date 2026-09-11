@@ -25,15 +25,21 @@ Panel {
   // WebSocket watcher, and notification process.
   readonly property var sharedComfyService: bar?.shell?.serviceFor(root.moduleName)
   readonly property var comfy: sharedComfyService || unavailableComfy
+  readonly property string panelRegistrationId: "panel-" + Math.random().toString(36).slice(2)
+  property var registeredComfy: null
 
   function suspendPanelForLock() {
     previewExpanded = false
     if (opened) close()
   }
-  onSharedComfyServiceChanged: {
-    if (sharedComfyService && sharedComfyService.sessionLocked)
-      suspendPanelForLock()
+  function syncPanelRegistration() {
+    if (registeredComfy && registeredComfy !== sharedComfyService)
+      registeredComfy.setPanelVisible(panelRegistrationId, false)
+    registeredComfy = sharedComfyService
+    if (registeredComfy)
+      registeredComfy.setPanelVisible(panelRegistrationId, opened)
   }
+  onSharedComfyServiceChanged: syncPanelRegistration()
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
@@ -55,6 +61,8 @@ Panel {
   implicitHeight: button.implicitHeight
 
   function stateTitle() {
+    if (root.opened && comfy.lockState === "unknown") return "Checking session…"
+    if (root.opened && comfy.lockState === "locked") return "Session locked"
     if (comfy.state === "checking") return "Checking…"
     if (comfy.state === "starting") return "Starting…"
     if (comfy.state === "offline") return "Offline"
@@ -66,6 +74,8 @@ Panel {
     return "Needs attention"
   }
   function stateMeta() {
+    if (root.opened && comfy.lockState === "unknown") return "Waiting for a safe desktop state"
+    if (root.opened && comfy.lockState === "locked") return "Monitoring is paused"
     if (comfy.healthy) return "ComfyUI " + comfy.version + (comfy.pendingCount > 0 ? " · " + comfy.pendingCount + " queued" : "")
     if (comfy.state === "starting") return "Waiting for the server to answer"
     if (comfy.state === "foreign-port") return "Another application owns the configured port"
@@ -103,6 +113,10 @@ Panel {
   function openOutput(output) { if (output && output.viewUrl) Qt.openUrlExternally(String(output.viewUrl)) }
   function actions() {
     var result = []
+    if (!comfy.monitoringEnabled) {
+      result.push({ label: "Refresh", kind: "refresh" })
+      return result
+    }
     if (comfy.healthy) result.push({ label: "Open ComfyUI", kind: "open" })
     else if (comfy.state !== "foreign-port" && comfy.state !== "starting") result.push({ label: "Start ComfyUI", kind: "start" })
     if (comfy.runningCount > 0) result.push({ label: "Interrupt generation", kind: "interrupt" })
@@ -127,11 +141,21 @@ Panel {
     else comfy.refresh()
   }
 
-  onOpenedChanged: if (opened) {
-    cursorActive = false; selectedAction = 0
-    previewExpanded = comfy.boolSetting("showPreviewByDefault", false)
-    comfy.refresh()
-    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  onOpenedChanged: {
+    syncPanelRegistration()
+    if (opened) {
+      cursorActive = false; selectedAction = 0
+      previewExpanded = comfy.boolSetting("showPreviewByDefault", false)
+      comfy.refresh()
+      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    } else {
+      previewExpanded = false
+    }
+  }
+  Component.onCompleted: syncPanelRegistration()
+  Component.onDestruction: {
+    if (registeredComfy)
+      registeredComfy.setPanelVisible(panelRegistrationId, false)
   }
 
   // Component construction happens before the bar API is injected. Keep
@@ -166,11 +190,14 @@ Panel {
     property bool jobStartExact: false
     property string acknowledgedState: ""
     property bool sessionLocked: false
+    property string lockState: "unknown"
+    property bool monitoringEnabled: false
     function boolSetting(name, fallback) {
       var value = root.setting(name, fallback)
       return value === true || String(value).toLowerCase() === "true"
     }
     function refresh() {}
+    function setPanelVisible(panelId, visible) {}
     function openServer() {}
     function startServer() {}
     function stopServer() {}
@@ -318,7 +345,7 @@ Panel {
                 width: parent.width * Math.max(0, Math.min(1, comfy.progress)); height: parent.height
                 radius: parent.radius; color: Color.accent
                 Behavior on width {
-                  enabled: root.opened && !comfy.sessionLocked
+                  enabled: root.opened && comfy.monitoringEnabled
                   NumberAnimation { duration: 120 }
                 }
               }
@@ -334,7 +361,7 @@ Panel {
                 width: parent.width * 0.3; height: parent.height
                 radius: height / 2; color: Color.accent
                 NumberAnimation on x {
-                  running: root.opened && !comfy.sessionLocked
+                  running: root.opened && comfy.monitoringEnabled
                     && comfy.state === "generating" && comfy.progressMax === 0
                   loops: Animation.Infinite; duration: 1300
                   from: -runner.width; to: indeterminateBar.width
@@ -422,7 +449,7 @@ Panel {
               Loader {
                 id: previewImageLoader
                 anchors.fill: parent
-                active: root.opened && root.previewExpanded && !comfy.sessionLocked
+                active: root.opened && root.previewExpanded && comfy.monitoringEnabled
                   && String(comfy.latestOutput.mediaKind || "") === "image"
                 sourceComponent: Component {
                   Image {

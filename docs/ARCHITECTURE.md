@@ -20,19 +20,19 @@ Comfy Cloud client and does not manage models, custom nodes, or workflows.
 ## Lock lifecycle
 
 Omarchy keeps its authentication service private, so third-party plugins
-cannot read the lock object directly. The service follows the current
-Quickshell log for Omarchy's `lock-requested` and `unlocked` lifecycle events.
-This is an event stream rather than a lock-state polling loop, and
-`lock-requested` is emitted before Omarchy creates its session-lock surfaces.
-The follower replays the last 50 lines when it reconnects so a brief reader
-failure does not normally lose the transition. While marked locked, a
-15-second lock-only reconciliation acts as a final safeguard against a missed
-unlock event; it does not contact ComfyUI.
+cannot read the lock object directly. While any popup is visible, the shared
+service checks Omarchy's lock-status IPC once per second. It pauses on a
+failed or ambiguous response and requires two fresh unlocked responses before
+starting work. Repeated probe failures back off to eight seconds. While marked
+locked, a 15-second reconciliation continues after the popup closes so a
+missed unlock cannot leave the plugin stuck.
 
-While locked, ComfyUI itself and any active generation keep running, but this
-plugin stops its status helper and WebSocket watcher. Every monitor popup
-closes, preview loaders are destroyed, and visual timers stop. Unlocking
-triggers an immediate status refresh and reconnects the watcher when needed.
+Popup visibility is the primary lifecycle boundary. When every popup is
+closed—or whenever lock state is not confirmed unlocked—the plugin stops its
+status helper and WebSocket watcher, destroys preview loaders, and stops visual
+timers. ComfyUI itself and any active generation keep running. A popup opening
+starts with an unknown lock state and does no ComfyUI work until two current
+checks confirm that the session is unlocked.
 
 QML should not infer process state from terminal output or assemble shell
 commands from user-provided paths.

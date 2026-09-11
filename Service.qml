@@ -9,13 +9,16 @@ Item {
   // share this one poller and WebSocket watcher.
   property var shell: null
   property var manifest: null
-  property string omarchyPath: Quickshell.env("OMARCHY_PATH")
   readonly property string pluginId: manifest && manifest.id
     ? String(manifest.id) : "meeksoft.comfyui-controls"
   readonly property var settings: settingsFromBarConfig()
-  property bool sessionLocked: false
-  property double lastLockEventMs: 0
-  property int lockProbeAttempts: 0
+  property var visiblePanels: ({})
+  property string lockState: "unknown"
+  property int unlockConfirmations: 0
+  property int lockProbeFailures: 0
+  property double lastUnlockedProbeMs: 0
+  property bool pendingRefresh: false
+  property bool lockProbeTimedOut: false
   property string state: "checking"
   property bool healthy: false
   property bool owned: false
@@ -51,7 +54,12 @@ Item {
   property double lastFailureNotifyMs: 0
 
   readonly property bool busy: actionProcess.running
-  readonly property bool monitoringEnabled: !sessionLocked
+  readonly property bool panelVisible: Object.keys(visiblePanels).length > 0
+  readonly property bool sessionLocked: lockState === "locked"
+  readonly property bool monitoringEnabled: panelVisible && lockState === "unlocked"
+  readonly property int lockProbeIntervalMs: panelVisible
+    ? Math.min(8000, 1000 * Math.pow(2, Math.min(lockProbeFailures, 3)))
+    : 15000
   readonly property var latestOutput: outputs.length > 0 ? outputs[0] : ({})
   readonly property real progress: progressMax > 0 ? progressValue / progressMax : 0
   readonly property int elapsedSeconds: jobStartMs > 0 ? Math.max(0, Math.floor((nowMs - jobStartMs) / 1000)) : 0
@@ -98,52 +106,96 @@ Item {
     var value = setting(name, fallback)
     return value === true || String(value).toLowerCase() === "true"
   }
-  function setSessionLocked(value) {
-    var locked = value === true
-    if (sessionLocked === locked) return
-    sessionLocked = locked
-    if (locked) {
-      refreshSoon.stop()
-      reconnectTimer.stop()
-      if (statusProcess.running) statusProcess.running = false
-      if (watchProcess.running) watchProcess.running = false
-      refreshing = false
-    } else {
+  function stopMonitoring() {
+    refreshSoon.stop()
+    reconnectTimer.stop()
+    if (statusProcess.running) statusProcess.running = false
+    if (watchProcess.running) watchProcess.running = false
+    refreshing = false
+  }
+  function setLockState(value) {
+    var next = String(value || "unknown")
+    if (next !== "locked" && next !== "unlocked") next = "unknown"
+    if (lockState === next) return
+    lockState = next
+    if (next !== "unlocked") stopMonitoring()
+    else if (panelVisible) {
       nowMs = Date.now()
       Qt.callLater(root.refresh)
     }
   }
-  function applyLockLogLine(raw) {
-    var line = String(raw || "")
-    if (line.indexOf("omarchy lock ") === -1) return
-    if (/ lock-requested\s*$/.test(line)) {
-      lastLockEventMs = Date.now()
-      setSessionLocked(true)
-    } else if (/ unlocked\s*$/.test(line)
-               || / session-locked=false\s*$/.test(line)) {
-      lastLockEventMs = Date.now()
-      setSessionLocked(false)
+  function setPanelVisible(panelId, visible) {
+    var key = String(panelId || "")
+    if (key === "") return
+    var wasVisible = panelVisible
+    var next = ({})
+    for (var existing in visiblePanels)
+      if (existing !== key) next[existing] = true
+    if (visible) next[key] = true
+    visiblePanels = next
+
+    if (!wasVisible && panelVisible) {
+      // Never trust a lock result retained while the UI was dormant. Keep all
+      // ComfyUI helpers paused until two fresh unlocked results agree.
+      unlockConfirmations = 0
+      pendingRefresh = true
+      setLockState("unknown")
+      requestLockProbe()
+    } else if (wasVisible && !panelVisible) {
+      pendingRefresh = false
+      stopMonitoring()
     }
   }
-  function applyInitialLockStatus(raw) {
-    // A lifecycle event received while the one-shot probe was running is
-    // newer and must win over its response.
-    if (lastLockEventMs > 0) return
-    try {
-      var parsed = JSON.parse(String(raw || "{}"))
-      if (parsed.locked !== undefined) setSessionLocked(parsed.locked === true)
-    } catch (error) {}
+  function requestLockProbe() {
+    if (lockProbeProcess.running) return
+    lockProbeTimedOut = false
+    lockProbeProcess.running = true
+    lockProbeTimeout.restart()
+  }
+  function applyLockStatus(exitCode, raw) {
+    var parsed = null
+    if (exitCode === 0) {
+      try { parsed = JSON.parse(String(raw || "{}")) }
+      catch (error) {}
+    }
+    if (!parsed || typeof parsed.locked !== "boolean") {
+      lockProbeFailures = Math.min(4, lockProbeFailures + 1)
+      unlockConfirmations = 0
+      // A failed probe must never resume work. Preserve a known locked state
+      // so its slow reconciliation continues after the popup closes.
+      if (lockState !== "locked") setLockState("unknown")
+      return
+    }
+
+    lockProbeFailures = 0
+    if (parsed.locked) {
+      unlockConfirmations = 0
+      setLockState("locked")
+      return
+    }
+
+    lastUnlockedProbeMs = Date.now()
+    unlockConfirmations = Math.min(2, unlockConfirmations + 1)
+    if (unlockConfirmations >= 2) setLockState("unlocked")
+  }
+  function requireFreshLockState() {
+    if (monitoringEnabled && Date.now() - lastUnlockedProbeMs < 1500) return true
+    pendingRefresh = true
+    requestLockProbe()
+    return false
   }
   function commonArgs(command) {
     return [helperPath, command, "--host", host, "--port", String(port),
             "--log-path", String(setting("logPath", ""))]
   }
   function refresh() {
-    if (!monitoringEnabled || statusProcess.running) return
+    if (!panelVisible || statusProcess.running) return
+    if (!requireFreshLockState()) return
+    pendingRefresh = false
     refreshing = true; statusProcess.command = commonArgs("status"); statusProcess.running = true
   }
   function runAction(command, message) {
-    if (busy) return
+    if (busy || !monitoringEnabled) return
     actionStatus = message; lastError = ""; actionProcess.command = command; actionProcess.running = true
   }
   function startServer() {
@@ -154,7 +206,7 @@ Item {
   }
   function stopServer() { if (owned || healthy) runAction(commonArgs("stop"), "Stopping ComfyUI…") }
   function interrupt() { if (healthy && runningCount > 0) runAction(commonArgs("interrupt"), "Requesting interrupt…") }
-  function openServer() { if (healthy && serverUrl !== "") Qt.openUrlExternally(serverUrl) }
+  function openServer() { if (monitoringEnabled && healthy && serverUrl !== "") Qt.openUrlExternally(serverUrl) }
 
   function applyStatus(raw) {
     if (!monitoringEnabled) return
@@ -248,7 +300,7 @@ Item {
     else if (!healthy && watchProcess.running) watchProcess.running = false
   }
   function notify(urgency, summary, body) {
-    if (sessionLocked || notifyProcess.running) return
+    if (!monitoringEnabled || notifyProcess.running) return
     notifyProcess.command = ["notify-send", "-u", urgency, "-a", "ComfyUI Control", summary, body]
     notifyProcess.running = true
   }
@@ -285,61 +337,36 @@ Item {
   Timer { id: reconnectTimer; interval: 1500; onTriggered: root.updateWatcher() }
   Timer { id: actionMessageTimer; interval: 3000; onTriggered: root.actionStatus = "" }
   Timer {
-    id: lockEventRestart
-    interval: 1000
-    onTriggered: if (!lockEventProcess.running) lockEventProcess.running = true
-  }
-  Timer {
-    id: initialLockProbeTimer
-    interval: 350
-    running: true
-    onTriggered: {
-      if (!initialLockProbe.running) initialLockProbe.running = true
-    }
-  }
-  Timer {
-    id: lockedStateReconcileTimer
-    interval: 15000
+    id: lockProbeTimer
+    interval: root.lockProbeIntervalMs
     repeat: true
-    running: root.sessionLocked
+    running: root.panelVisible || root.lockState === "locked"
+    onTriggered: root.requestLockProbe()
+  }
+  Timer {
+    id: lockProbeTimeout
+    interval: 2500
     onTriggered: {
-      if (!lockedStateReconcile.running) lockedStateReconcile.running = true
+      if (!lockProbeProcess.running) return
+      root.lockProbeTimedOut = true
+      lockProbeProcess.running = false
     }
   }
 
-  // The lock service is intentionally private to Omarchy plugins. Its debug
-  // lifecycle messages are emitted before the 500ms session-lock allocation,
-  // so following the current shell log gives this plugin an event-driven,
-  // read-only lock signal without polling or modifying packaged code.
+  // Omarchy's lock object is private to the shell. Probe its supported IPC
+  // endpoint only while a popup is visible, with a slow locked-state
+  // reconciliation after the popup closes. Failed or ambiguous probes keep
+  // all ComfyUI helpers paused.
   Process {
-    id: lockEventProcess
-    command: ["qs", "log", "-n", "-p", root.omarchyPath + "/shell",
-              "--follow", "--tail", "50", "--no-color"]
-    running: root.omarchyPath !== ""
-    stdout: SplitParser { onRead: function(data) { root.applyLockLogLine(data) } }
-    onExited: function(exitCode) {
-      if (root.omarchyPath !== "") lockEventRestart.restart()
-    }
-  }
-  Process {
-    id: initialLockProbe
+    id: lockProbeProcess
     command: ["omarchy-shell", "lock", "status"]
-    stdout: StdioCollector { id: initialLockProbeOutput; waitForEnd: true }
+    stdout: StdioCollector { id: lockProbeOutput; waitForEnd: true }
     onExited: function(exitCode) {
-      if (exitCode === 0) root.applyInitialLockStatus(initialLockProbeOutput.text)
-      else if (++root.lockProbeAttempts < 5) initialLockProbeTimer.restart()
-    }
-  }
-  Process {
-    id: lockedStateReconcile
-    command: ["omarchy-shell", "lock", "status"]
-    stdout: StdioCollector { id: lockedStateReconcileOutput; waitForEnd: true }
-    onExited: function(exitCode) {
-      if (exitCode !== 0 || !root.sessionLocked) return
-      try {
-        var parsed = JSON.parse(String(lockedStateReconcileOutput.text || "{}"))
-        if (parsed.locked === false) root.setSessionLocked(false)
-      } catch (error) {}
+      lockProbeTimeout.stop()
+      root.applyLockStatus(root.lockProbeTimedOut ? -1 : exitCode,
+                           root.lockProbeTimedOut ? "" : lockProbeOutput.text)
+      root.lockProbeTimedOut = false
+      if (root.pendingRefresh && root.monitoringEnabled) Qt.callLater(root.refresh)
     }
   }
 
