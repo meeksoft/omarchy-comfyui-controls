@@ -2,15 +2,17 @@
   "schemaVersion": 1,
   "id": "meeksoft.comfyui-controls",
   "name": "ComfyUI Control",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "author": "Meeksoft",
   "license": "MIT",
   "description": "Start, monitor, and open one local ComfyUI server from the Omarchy bar.",
   "kinds": [
+    "service",
     "bar-widget"
   ],
   "activation": "on-demand",
   "entryPoints": {
+    "service": "Service.qml",
     "barWidget": "Panel.qml"
   },
   "barWidget": {

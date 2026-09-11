@@ -77,13 +77,20 @@ The controller refuses to start a server on any host other than `127.0.0.1`,
 
 ## Usage
 
-The panel refreshes on its configured interval. It can safely attach to an
-existing server. **Stop** ends a server this plugin started through its
+One shared background service refreshes on the configured interval, even when
+the bar is present on multiple monitors. Output images are loaded only when a
+panel is open and its latest-output section is expanded. The plugin can safely
+attach to an existing server. **Stop** ends a server this plugin started through its
 systemd unit; for any other healthy ComfyUI on a loopback port it signals the
 process holding that port, so a server started from a terminal can be stopped
 too. The action is labelled **Stop managed server** in the first case and
 **Stop ComfyUI server** in the second. A remote host, or a port that does not
 answer as ComfyUI, is refused rather than signalled.
+
+When Omarchy begins locking the session, the plugin closes every monitor's
+popup, destroys any loaded preview, and pauses status and WebSocket helpers.
+ComfyUI and active generations continue running. Monitoring refreshes
+immediately after unlock.
 
 When the panel is focused, press `P` to expand the latest output, `J` to toggle
 the jobs list, `E` to toggle diagnostics, `R` to refresh, `O` to open ComfyUI,

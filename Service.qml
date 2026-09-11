@@ -4,7 +4,18 @@ import Quickshell.Io
 
 Item {
   id: root
-  property var settings: ({})
+  // Omarchy creates service entry points once per enabled plugin. Read the
+  // widget's inline settings from the scoped shell API so every monitor can
+  // share this one poller and WebSocket watcher.
+  property var shell: null
+  property var manifest: null
+  property string omarchyPath: Quickshell.env("OMARCHY_PATH")
+  readonly property string pluginId: manifest && manifest.id
+    ? String(manifest.id) : "meeksoft.comfyui-controls"
+  readonly property var settings: settingsFromBarConfig()
+  property bool sessionLocked: false
+  property double lastLockEventMs: 0
+  property int lockProbeAttempts: 0
   property string state: "checking"
   property bool healthy: false
   property bool owned: false
@@ -40,6 +51,7 @@ Item {
   property double lastFailureNotifyMs: 0
 
   readonly property bool busy: actionProcess.running
+  readonly property bool monitoringEnabled: !sessionLocked
   readonly property var latestOutput: outputs.length > 0 ? outputs[0] : ({})
   readonly property real progress: progressMax > 0 ? progressValue / progressMax : 0
   readonly property int elapsedSeconds: jobStartMs > 0 ? Math.max(0, Math.floor((nowMs - jobStartMs) / 1000)) : 0
@@ -52,6 +64,25 @@ Item {
   readonly property string host: stringSetting("host", "127.0.0.1")
   readonly property int port: intSetting("port", 8188, 1, 65535)
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 2, 1, 60)
+
+  function settingsFromBarConfig() {
+    var config = shell && shell.barConfig ? shell.barConfig : ({})
+    var layout = config && config.layout ? config.layout : ({})
+    var sections = ["left", "center", "right"]
+    for (var sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+      var entries = layout[sections[sectionIndex]]
+      if (!Array.isArray(entries)) continue
+      for (var entryIndex = 0; entryIndex < entries.length; entryIndex++) {
+        var entry = entries[entryIndex]
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue
+        if (String(entry.id || "") !== pluginId) continue
+        var result = ({})
+        for (var key in entry) if (key !== "id") result[key] = entry[key]
+        return result
+      }
+    }
+    return ({})
+  }
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -67,12 +98,48 @@ Item {
     var value = setting(name, fallback)
     return value === true || String(value).toLowerCase() === "true"
   }
+  function setSessionLocked(value) {
+    var locked = value === true
+    if (sessionLocked === locked) return
+    sessionLocked = locked
+    if (locked) {
+      refreshSoon.stop()
+      reconnectTimer.stop()
+      if (statusProcess.running) statusProcess.running = false
+      if (watchProcess.running) watchProcess.running = false
+      refreshing = false
+    } else {
+      nowMs = Date.now()
+      Qt.callLater(root.refresh)
+    }
+  }
+  function applyLockLogLine(raw) {
+    var line = String(raw || "")
+    if (line.indexOf("omarchy lock ") === -1) return
+    if (/ lock-requested\s*$/.test(line)) {
+      lastLockEventMs = Date.now()
+      setSessionLocked(true)
+    } else if (/ unlocked\s*$/.test(line)
+               || / session-locked=false\s*$/.test(line)) {
+      lastLockEventMs = Date.now()
+      setSessionLocked(false)
+    }
+  }
+  function applyInitialLockStatus(raw) {
+    // A lifecycle event received while the one-shot probe was running is
+    // newer and must win over its response.
+    if (lastLockEventMs > 0) return
+    try {
+      var parsed = JSON.parse(String(raw || "{}"))
+      if (parsed.locked !== undefined) setSessionLocked(parsed.locked === true)
+    } catch (error) {}
+  }
   function commonArgs(command) {
     return [helperPath, command, "--host", host, "--port", String(port),
             "--log-path", String(setting("logPath", ""))]
   }
   function refresh() {
-    if (statusProcess.running) return
+    if (!monitoringEnabled || statusProcess.running) return
     refreshing = true; statusProcess.command = commonArgs("status"); statusProcess.running = true
   }
   function runAction(command, message) {
@@ -90,6 +157,7 @@ Item {
   function openServer() { if (healthy && serverUrl !== "") Qt.openUrlExternally(serverUrl) }
 
   function applyStatus(raw) {
+    if (!monitoringEnabled) return
     var parsed
     try { parsed = JSON.parse(String(raw || "{}")) }
     catch (error) { lastError = "Could not understand the controller response."; return }
@@ -130,6 +198,7 @@ Item {
     updateWatcher()
   }
   function applyEvent(raw) {
+    if (!monitoringEnabled) return
     var event
     try { event = JSON.parse(String(raw || "{}")) } catch (error) { return }
     if (event.type === "progress") {
@@ -171,11 +240,15 @@ Item {
     }
   }
   function updateWatcher() {
+    if (!monitoringEnabled) {
+      if (watchProcess.running) watchProcess.running = false
+      return
+    }
     if (healthy && !watchProcess.running) { watchProcess.command = commonArgs("watch"); watchProcess.running = true }
     else if (!healthy && watchProcess.running) watchProcess.running = false
   }
   function notify(urgency, summary, body) {
-    if (notifyProcess.running) return
+    if (sessionLocked || notifyProcess.running) return
     notifyProcess.command = ["notify-send", "-u", urgency, "-a", "ComfyUI Control", summary, body]
     notifyProcess.running = true
   }
@@ -194,16 +267,89 @@ Item {
     }
   }
 
-  Timer { interval: root.refreshIntervalSec * 1000; repeat: true; running: true; triggeredOnStart: true; onTriggered: root.refresh() }
-  Timer { interval: 1000; repeat: true; running: true; onTriggered: root.nowMs = Date.now() }
+  Timer {
+    interval: root.refreshIntervalSec * 1000
+    repeat: true
+    running: root.monitoringEnabled
+    triggeredOnStart: true
+    onTriggered: root.refresh()
+  }
+  Timer {
+    interval: 1000
+    repeat: true
+    running: root.monitoringEnabled && root.state === "generating"
+    triggeredOnStart: true
+    onTriggered: root.nowMs = Date.now()
+  }
   Timer { id: refreshSoon; interval: 300; onTriggered: root.refresh() }
   Timer { id: reconnectTimer; interval: 1500; onTriggered: root.updateWatcher() }
   Timer { id: actionMessageTimer; interval: 3000; onTriggered: root.actionStatus = "" }
+  Timer {
+    id: lockEventRestart
+    interval: 1000
+    onTriggered: if (!lockEventProcess.running) lockEventProcess.running = true
+  }
+  Timer {
+    id: initialLockProbeTimer
+    interval: 350
+    running: true
+    onTriggered: {
+      if (!initialLockProbe.running) initialLockProbe.running = true
+    }
+  }
+  Timer {
+    id: lockedStateReconcileTimer
+    interval: 15000
+    repeat: true
+    running: root.sessionLocked
+    onTriggered: {
+      if (!lockedStateReconcile.running) lockedStateReconcile.running = true
+    }
+  }
+
+  // The lock service is intentionally private to Omarchy plugins. Its debug
+  // lifecycle messages are emitted before the 500ms session-lock allocation,
+  // so following the current shell log gives this plugin an event-driven,
+  // read-only lock signal without polling or modifying packaged code.
+  Process {
+    id: lockEventProcess
+    command: ["qs", "log", "-n", "-p", root.omarchyPath + "/shell",
+              "--follow", "--tail", "50", "--no-color"]
+    running: root.omarchyPath !== ""
+    stdout: SplitParser { onRead: function(data) { root.applyLockLogLine(data) } }
+    onExited: function(exitCode) {
+      if (root.omarchyPath !== "") lockEventRestart.restart()
+    }
+  }
+  Process {
+    id: initialLockProbe
+    command: ["omarchy-shell", "lock", "status"]
+    stdout: StdioCollector { id: initialLockProbeOutput; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.applyInitialLockStatus(initialLockProbeOutput.text)
+      else if (++root.lockProbeAttempts < 5) initialLockProbeTimer.restart()
+    }
+  }
+  Process {
+    id: lockedStateReconcile
+    command: ["omarchy-shell", "lock", "status"]
+    stdout: StdioCollector { id: lockedStateReconcileOutput; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0 || !root.sessionLocked) return
+      try {
+        var parsed = JSON.parse(String(lockedStateReconcileOutput.text || "{}"))
+        if (parsed.locked === false) root.setSessionLocked(false)
+      } catch (error) {}
+    }
+  }
 
   Process {
     id: statusProcess; command: []
     stdout: StdioCollector { id: statusOutput; waitForEnd: true }
-    onExited: function(exitCode) { root.refreshing = false; root.applyStatus(statusOutput.text) }
+    onExited: function(exitCode) {
+      root.refreshing = false
+      if (root.monitoringEnabled) root.applyStatus(statusOutput.text)
+    }
   }
   Process {
     id: actionProcess; command: []
@@ -214,13 +360,16 @@ Item {
       try { parsed = JSON.parse(String(actionOutput.text || "")) } catch (error) {}
       if (parsed && parsed.message) root.actionStatus = String(parsed.message)
       if (exitCode !== 0) root.lastError = parsed && parsed.message ? String(parsed.message) : String(actionError.text || "Action failed").trim()
-      actionMessageTimer.restart(); refreshSoon.restart()
+      actionMessageTimer.restart()
+      if (root.monitoringEnabled) refreshSoon.restart()
     }
   }
   Process {
     id: watchProcess; command: []
     stdout: SplitParser { onRead: function(data) { root.applyEvent(data) } }
-    onExited: function(exitCode) { if (root.healthy) reconnectTimer.restart() }
+    onExited: function(exitCode) {
+      if (root.monitoringEnabled && root.healthy) reconnectTimer.restart()
+    }
   }
   Process { id: notifyProcess; command: [] }
 }

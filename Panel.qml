@@ -20,6 +20,21 @@ Panel {
   readonly property bool ipcOwner: !!panelScreen && Quickshell.screens.length > 0
     && panelScreen.name === Quickshell.screens[0].name
 
+  // The service entry point is a singleton owned by Omarchy. Each monitor's
+  // widget renders the same state instead of starting its own status process,
+  // WebSocket watcher, and notification process.
+  readonly property var sharedComfyService: bar?.shell?.serviceFor(root.moduleName)
+  readonly property var comfy: sharedComfyService || unavailableComfy
+
+  function suspendPanelForLock() {
+    previewExpanded = false
+    if (opened) close()
+  }
+  onSharedComfyServiceChanged: {
+    if (sharedComfyService && sharedComfyService.sessionLocked)
+      suspendPanelForLock()
+  }
+
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color active: Color.bar.active
@@ -119,7 +134,56 @@ Panel {
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
-  Service { id: comfy; settings: root.settings }
+  // Component construction happens before the bar API is injected. Keep
+  // bindings quiet during that brief window without starting a fallback
+  // Service (and therefore another set of helper processes).
+  QtObject {
+    id: unavailableComfy
+    property string state: "checking"
+    property bool healthy: false
+    property bool owned: false
+    property int runningCount: 0
+    property int pendingCount: 0
+    property string version: ""
+    property string device: ""
+    property double vramTotal: 0
+    property double vramFree: 0
+    property var jobs: []
+    property var outputs: []
+    property var latestOutput: ({})
+    property var recentEvents: []
+    property var logEvents: []
+    property string serverUrl: ""
+    property string progressNode: ""
+    property int progressMax: 0
+    property real progress: 0
+    property string actionStatus: ""
+    property string lastError: ""
+    property bool busy: false
+    property int elapsedSeconds: 0
+    property int etaSeconds: -1
+    property double jobStartMs: 0
+    property bool jobStartExact: false
+    property string acknowledgedState: ""
+    property bool sessionLocked: false
+    function boolSetting(name, fallback) {
+      var value = root.setting(name, fallback)
+      return value === true || String(value).toLowerCase() === "true"
+    }
+    function refresh() {}
+    function openServer() {}
+    function startServer() {}
+    function stopServer() {}
+    function interrupt() {}
+    function acknowledge() {}
+  }
+
+  Connections {
+    target: comfy
+    function onSessionLockedChanged() {
+      if (comfy.sessionLocked) root.suspendPanelForLock()
+    }
+  }
 
   IpcHandler {
     enabled: root.ipcOwner
@@ -253,7 +317,10 @@ Panel {
               Rectangle {
                 width: parent.width * Math.max(0, Math.min(1, comfy.progress)); height: parent.height
                 radius: parent.radius; color: Color.accent
-                Behavior on width { NumberAnimation { duration: 120 } }
+                Behavior on width {
+                  enabled: root.opened && !comfy.sessionLocked
+                  NumberAnimation { duration: 120 }
+                }
               }
             }
             Rectangle {
@@ -267,6 +334,8 @@ Panel {
                 width: parent.width * 0.3; height: parent.height
                 radius: height / 2; color: Color.accent
                 NumberAnimation on x {
+                  running: root.opened && !comfy.sessionLocked
+                    && comfy.state === "generating" && comfy.progressMax === 0
                   loops: Animation.Infinite; duration: 1300
                   from: -runner.width; to: indeterminateBar.width
                   easing.type: Easing.InOutQuad
@@ -350,11 +419,21 @@ Panel {
               implicitHeight: String(comfy.latestOutput.mediaKind || "") === "image" ? Style.space(190) : Style.space(72)
               radius: Style.cornerRadius
               clip: true
-              Image {
+              Loader {
+                id: previewImageLoader
                 anchors.fill: parent
-                visible: String(comfy.latestOutput.mediaKind || "") === "image"
-                source: visible ? String(comfy.latestOutput.viewUrl || "") : ""
-                fillMode: Image.PreserveAspectFit; asynchronous: true; cache: false
+                active: root.opened && root.previewExpanded && !comfy.sessionLocked
+                  && String(comfy.latestOutput.mediaKind || "") === "image"
+                sourceComponent: Component {
+                  Image {
+                    source: String(comfy.latestOutput.viewUrl || "")
+                    sourceSize.width: Math.max(1, Math.round(previewImageLoader.width * 2))
+                    sourceSize.height: Math.max(1, Math.round(previewImageLoader.height * 2))
+                    fillMode: Image.PreserveAspectFit
+                    asynchronous: true
+                    cache: false
+                  }
+                }
               }
               Text {
                 anchors.centerIn: parent

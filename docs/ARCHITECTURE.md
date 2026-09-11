@@ -7,11 +7,32 @@ Comfy Cloud client and does not manage models, custom nodes, or workflows.
 
 ## Components
 
-1. `Panel.qml` renders the Omarchy bar widget and popup.
+1. `Panel.qml` renders the Omarchy bar widget and popup on each monitor. These
+   instances read one shared service and only load an output preview while
+   their popup is open and its preview section is expanded.
 2. `bin/comfyui-control` owns server lifecycle operations and emits structured
    JSON responses.
-3. `Service.qml` reads health, queue, progress, history, and preview
-   information from the local server APIs.
+3. `Service.qml` is the plugin's Omarchy service entry point. One instance
+   reads health, queue, progress, history, and preview information from the
+   local server APIs, owns the WebSocket watcher, and sends notifications for
+   all monitor widgets.
+
+## Lock lifecycle
+
+Omarchy keeps its authentication service private, so third-party plugins
+cannot read the lock object directly. The service follows the current
+Quickshell log for Omarchy's `lock-requested` and `unlocked` lifecycle events.
+This is an event stream rather than a lock-state polling loop, and
+`lock-requested` is emitted before Omarchy creates its session-lock surfaces.
+The follower replays the last 50 lines when it reconnects so a brief reader
+failure does not normally lose the transition. While marked locked, a
+15-second lock-only reconciliation acts as a final safeguard against a missed
+unlock event; it does not contact ComfyUI.
+
+While locked, ComfyUI itself and any active generation keep running, but this
+plugin stops its status helper and WebSocket watcher. Every monitor popup
+closes, preview loaders are destroyed, and visual timers stop. Unlocking
+triggers an immediate status refresh and reconnects the watcher when needed.
 
 QML should not infer process state from terminal output or assemble shell
 commands from user-provided paths.
