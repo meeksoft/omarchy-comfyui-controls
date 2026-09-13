@@ -79,7 +79,9 @@ The controller refuses to start a server on any host other than `127.0.0.1`,
 
 One shared service refreshes on the configured interval while a panel is open,
 even when the bar is present on multiple monitors. It pauses when every panel
-is closed. Output images are loaded only when a panel is open and its
+is closed, except for a minimal icon-only check — server health and queue
+counts, nothing else — that keeps the bar icon current while the session is
+not locked. Output images are loaded only when a panel is open and its
 latest-output section is expanded. The plugin can safely attach to an existing
 server. **Stop** ends a server this plugin started through its
 systemd unit; for any other healthy ComfyUI on a loopback port it signals the
@@ -91,7 +93,8 @@ answer as ComfyUI, is refused rather than signalled.
 While a popup is open, the plugin checks Omarchy's current lock state and
 closes every monitor's popup when locking is observed. Loaded previews are
 destroyed and status, WebSocket, and visual helpers pause whenever the popup
-is closed or the lock state is uncertain. ComfyUI and active generations
+is closed or the lock state is uncertain; the icon-only check also pauses
+while the session is confirmed locked. ComfyUI and active generations
 continue running. After unlock, opening the panel confirms the current lock
 state and refreshes it after a brief safety delay.
 
@@ -147,7 +150,7 @@ API design.
 The bundled controller has no third-party Python dependencies:
 
 ```text
-bin/comfyui-control status [--host HOST] [--port PORT]
+bin/comfyui-control status [--host HOST] [--port PORT] [--light]
 bin/comfyui-control start --root COMFYUI_FOLDER [--python PYTHON]
 bin/comfyui-control stop
 bin/comfyui-control interrupt

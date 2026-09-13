@@ -307,7 +307,7 @@ def queue_state(host, port):
         return 0, 0, []
 
 
-def status(host, port, log_path=""):
+def status(host, port, log_path="", light=False):
     info = health(host, port)
     occupied = info is None and port_open(host, port)
     if info is None and occupied: info = health(host, port, 5.0)
@@ -317,14 +317,23 @@ def status(host, port, log_path=""):
         # outrank the foreign-port reading that half-open socket would give.
         mine = owned(host, port)
         state = "starting" if mine else ("foreign-port" if occupied else stale_unit(host, port) or "offline")
-        return {"ok": True, "state": state, "healthy": False, "owned": mine,
-                "running": 0, "pending": 0, "jobs": [], "outputs": [], "recentEvents": [],
-                "logEvents": (log_summary(log_path) + journal_summary(host, port))[:30], "url": url(host, port)}
+        result = {"ok": True, "state": state, "healthy": False, "owned": mine,
+                  "occupied": occupied, "running": 0, "pending": 0, "jobs": [], "outputs": [],
+                  "recentEvents": [], "url": url(host, port)}
+        if not light:
+            result["logEvents"] = (log_summary(log_path) + journal_summary(host, port))[:30]
+        return result
     try:
         running, pending, jobs = queue_state(host, port)
     except (OSError, ValueError, HTTPError, URLError):
         running = pending = 0; jobs = []
     state = "generating" if running else "queued" if pending else "idle"
+    if light:
+        # Icon-only reading: health and queue counts. It runs even when no
+        # panel is open, so it must never pull logs, history, outputs, or
+        # anything carrying prompt payloads.
+        return {"ok": True, "state": state, "healthy": True, "occupied": True,
+                "running": running, "pending": pending, "url": url(host, port), **info}
     history = history_summary(host, port)
     outputs = history["outputs"]
     server_log = server_log_path(host, port)
@@ -539,7 +548,9 @@ def watch(host, port):
 def arguments():
     common = argparse.ArgumentParser(add_help=False); common.add_argument("--host", default="127.0.0.1"); common.add_argument("--port", type=int, default=8188); common.add_argument("--log-path", default="")
     parser = argparse.ArgumentParser(); commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("status", parents=[common]); launch = commands.add_parser("start", parents=[common])
+    status_parser = commands.add_parser("status", parents=[common])
+    status_parser.add_argument("--light", action="store_true")
+    launch = commands.add_parser("start", parents=[common])
     launch.add_argument("--root", default=""); launch.add_argument("--python", default=""); launch.add_argument("--start-timeout", type=float, default=30)
     commands.add_parser("stop", parents=[common]); commands.add_parser("interrupt", parents=[common]); commands.add_parser("watch", parents=[common])
     return parser.parse_args()
@@ -550,7 +561,7 @@ def main():
     try:
         if not 1 <= args.port <= 65535: raise ValueError("Port must be between 1 and 65535.")
         if args.command == "watch": return watch(args.host, args.port)
-        result = status(args.host, args.port, args.log_path) if args.command == "status" else start(args) if args.command == "start" else stop(args.host, args.port) if args.command == "stop" else interrupt(args.host, args.port)
+        result = status(args.host, args.port, args.log_path, args.light) if args.command == "status" else start(args) if args.command == "start" else stop(args.host, args.port) if args.command == "stop" else interrupt(args.host, args.port)
         emit(result); return 0 if result.get("ok") else 1
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         emit({"ok": False, "state": "error", "message": str(error)[:240]}); return 1

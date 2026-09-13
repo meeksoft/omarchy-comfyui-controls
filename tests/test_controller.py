@@ -141,11 +141,10 @@ class FakeComfySocket:
 
 
 class ControllerTests(unittest.TestCase):
-    def run_status(self, port):
-        result = subprocess.run(
-            ["python3", str(CONTROLLER), "status", "--host", "127.0.0.1", "--port", str(port)],
-            check=True, text=True, capture_output=True,
-        )
+    def run_status(self, port, extra=None):
+        command = ["python3", str(CONTROLLER), "status", "--host", "127.0.0.1", "--port", str(port)]
+        command.extend(extra or [])
+        result = subprocess.run(command, check=True, text=True, capture_output=True)
         return json.loads(result.stdout)
 
     def test_reports_comfyui_queue_and_preview(self):
@@ -192,6 +191,40 @@ class ControllerTests(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+    def test_light_status_reports_queue_without_payload(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), ComfyHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            value = self.run_status(server.server_port, ["--light"])
+            self.assertEqual("queued", value["state"])
+            self.assertTrue(value["healthy"])
+            self.assertEqual(1, value["pending"])
+            self.assertEqual("test", value["version"])
+            for key in ("jobs", "outputs", "previewUrl", "recentEvents", "logEvents"):
+                self.assertNotIn(key, value)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_light_status_marks_occupied_and_skips_log_summaries(self):
+        controller = load_controller()
+        with tempfile.TemporaryDirectory() as base, \
+             patch.dict(controller.os.environ, {"XDG_STATE_HOME": base}), \
+             patch.object(controller, "health", return_value=None), \
+             patch.object(controller, "port_open", return_value=True), \
+             patch.object(controller, "owned", return_value=True), \
+             patch.object(controller, "log_summary", return_value=[]) as logs, \
+             patch.object(controller, "journal_summary", return_value=[]) as journal:
+            value = controller.status("127.0.0.1", 8188, "", True)
+        logs.assert_not_called()
+        journal.assert_not_called()
+        self.assertEqual("starting", value["state"])
+        self.assertFalse(value["healthy"])
+        self.assertTrue(value["occupied"])
+        self.assertTrue(value["owned"])
+        self.assertNotIn("logEvents", value)
 
     def test_parse_progress_uses_last_tqdm_chunk(self):
         controller = load_controller()

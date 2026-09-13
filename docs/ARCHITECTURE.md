@@ -27,12 +27,16 @@ starting work. Repeated probe failures back off to eight seconds. While marked
 locked, a 15-second reconciliation continues after the popup closes so a
 missed unlock cannot leave the plugin stuck.
 
-Popup visibility is the primary lifecycle boundary. When every popup is
-closed—or whenever lock state is not confirmed unlocked—the plugin stops its
-status helper and WebSocket watcher, destroys preview loaders, and stops visual
-timers. ComfyUI itself and any active generation keep running. A popup opening
-starts with an unknown lock state and does no ComfyUI work until two current
-checks confirm that the session is unlocked.
+Popup visibility is the primary lifecycle boundary for panel data. When every
+popup is closed—or whenever lock state is not confirmed unlocked—the plugin
+stops its status helper and WebSocket watcher, destroys preview loaders, and
+stops visual timers. ComfyUI itself and any active generation keep running. A
+minimal icon-only health reading (health plus queue counts, nothing else)
+continues while the session is not confirmed locked, so the bar icon keeps
+tracking offline, idle, queued, generating, and alarming states without
+loading panel data. A popup opening starts with an unknown lock state and
+loads no panel data until two current checks confirm that the session is
+unlocked.
 
 QML should not infer process state from terminal output or assemble shell
 commands from user-provided paths.
@@ -69,6 +73,33 @@ never sufficient on its own, and a remote host is always refused.
   clears the state file; the badge can be acknowledged from the panel until
   the state changes.
 - `error`: controller or API failure with a user-actionable message
+
+## Bar icon presentation
+
+While a panel is open and the session is confirmed unlocked, the full status
+reading drives the icon. At every other time a minimal icon-only reading —
+server health and queue counts, never logs, history, outputs, or prompt
+payloads — refreshes the icon every five seconds, pausing only while the
+session is confirmed locked.
+
+| Situation | Bar icon | Driven by |
+|---|---|---|
+| `offline` — no listener, not owned | muted | `healthy` false |
+| `starting` — owned, not yet answering | muted | `healthy` false |
+| `checking` — fresh service, lock unconfirmed, placeholder | muted (until the first poll) | initial `healthy` false |
+| `idle` — running, no jobs | foreground | `healthy` true |
+| `queued` — pending work, none executing | active highlight | state is `queued` |
+| `generating` — job executing | active highlight | state is `generating` |
+| `error`, `foreign-port`, `crashed` | urgent with `!` badge until acknowledged | alarming state |
+| Server stops while every popup is closed | muted within one icon poll | icon-only reading |
+| Server starts, recovers, or runs jobs while every popup is closed | reflected within one icon poll | icon-only reading |
+
+An owned server whose port is still bound but whose `/system_stats` stalls —
+post-generation model management can block it for seconds — keeps its last
+healthy reading through a fifteen-second grace window instead of flashing to
+muted `starting`. Muted therefore means "no healthy server answering", which
+covers offline, a starting server outside the grace window, and the brief
+initial check.
 
 ## Progress sources
 

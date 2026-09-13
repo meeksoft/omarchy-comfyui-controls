@@ -52,11 +52,18 @@ Item {
   property string acknowledgedState: ""
   property double lastAlarmNotifyMs: Date.now()
   property double lastFailureNotifyMs: 0
+  property double lastHealthyMs: 0
 
   readonly property bool busy: actionProcess.running
   readonly property bool panelVisible: Object.keys(visiblePanels).length > 0
   readonly property bool sessionLocked: lockState === "locked"
   readonly property bool monitoringEnabled: panelVisible && lockState === "unlocked"
+  // The bar icon must track the server even when no popup is open, but it
+  // only needs health and queue counts for that — never the logs, history,
+  // or prompt payloads the full status loads. The light poll pauses only
+  // while the session is confirmed locked.
+  readonly property bool iconPollingEnabled: lockState !== "locked" && !panelVisible
+  readonly property int slowServerGraceMs: 15000
   readonly property int lockProbeIntervalMs: panelVisible
     ? Math.min(8000, 1000 * Math.pow(2, Math.min(lockProbeFailures, 3)))
     : 15000
@@ -208,11 +215,22 @@ Item {
   function interrupt() { if (healthy && runningCount > 0) runAction(commonArgs("interrupt"), "Requesting interrupt…") }
   function openServer() { if (monitoringEnabled && healthy && serverUrl !== "") Qt.openUrlExternally(serverUrl) }
 
+  function acceptReading(parsed) {
+    if (parsed.healthy === true) { lastHealthyMs = Date.now(); return true }
+    // /system_stats can stall for seconds during post-generation model
+    // management. An owned server whose port is still bound is slow, not
+    // stopped, so hold the last healthy reading through a grace window
+    // instead of flashing the icon to muted.
+    if (parsed.occupied === true && parsed.owned === true
+        && healthy && Date.now() - lastHealthyMs < slowServerGraceMs) return false
+    return true
+  }
   function applyStatus(raw) {
     if (!monitoringEnabled) return
     var parsed
     try { parsed = JSON.parse(String(raw || "{}")) }
     catch (error) { lastError = "Could not understand the controller response."; return }
+    if (!acceptReading(parsed)) return
     state = String(parsed.state || "error"); healthy = parsed.healthy === true; owned = parsed.owned === true
     if (state !== acknowledgedState) acknowledgedState = ""
     runningCount = Number(parsed.running || 0); pendingCount = Number(parsed.pending || 0)
@@ -291,6 +309,32 @@ Item {
       refreshSoon.restart()
     }
   }
+  function pollIcon() {
+    if (iconProcess.running) return
+    var command = commonArgs("status")
+    command.push("--light")
+    iconProcess.command = command; iconProcess.running = true
+  }
+  function applyLight(raw) {
+    if (lockState === "locked") return
+    var parsed
+    try { parsed = JSON.parse(String(raw || "{}")) } catch (error) { return }
+    if (!acceptReading(parsed)) return
+    state = String(parsed.state || "error")
+    healthy = parsed.healthy === true
+    if (parsed.owned === true || parsed.owned === false) owned = parsed.owned === true
+    runningCount = Number(parsed.running || 0)
+    pendingCount = Number(parsed.pending || 0)
+    if (parsed.url) serverUrl = String(parsed.url)
+    if (healthy) {
+      version = String(parsed.version || version)
+      device = String(parsed.device || device)
+      if (Number(parsed.vramTotal || 0) > 0) vramTotal = Number(parsed.vramTotal)
+      if (Number(parsed.vramFree || 0) > 0) vramFree = Number(parsed.vramFree)
+    }
+    if (state !== acknowledgedState) acknowledgedState = ""
+    checkAlarmNotify(); prevState = state
+  }
   function updateWatcher() {
     if (!monitoringEnabled) {
       if (watchProcess.running) watchProcess.running = false
@@ -300,7 +344,7 @@ Item {
     else if (!healthy && watchProcess.running) watchProcess.running = false
   }
   function notify(urgency, summary, body) {
-    if (!monitoringEnabled || notifyProcess.running) return
+    if (lockState === "locked" || notifyProcess.running) return
     notifyProcess.command = ["notify-send", "-u", urgency, "-a", "ComfyUI Control", summary, body]
     notifyProcess.running = true
   }
@@ -325,6 +369,14 @@ Item {
     running: root.monitoringEnabled
     triggeredOnStart: true
     onTriggered: root.refresh()
+  }
+  Timer {
+    id: iconPollTimer
+    interval: 5000
+    repeat: true
+    running: root.iconPollingEnabled
+    triggeredOnStart: true
+    onTriggered: root.pollIcon()
   }
   Timer {
     interval: 1000
@@ -376,6 +428,13 @@ Item {
     onExited: function(exitCode) {
       root.refreshing = false
       if (root.monitoringEnabled) root.applyStatus(statusOutput.text)
+    }
+  }
+  Process {
+    id: iconProcess; command: []
+    stdout: StdioCollector { id: iconOutput; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (root.iconPollingEnabled) root.applyLight(iconOutput.text)
     }
   }
   Process {
