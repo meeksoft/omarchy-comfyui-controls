@@ -88,6 +88,20 @@ class JobsApiHandler(ComfyHandler):
             ComfyHandler.do_GET(self)
 
 
+class FreeCaptureHandler(ComfyHandler):
+    """Serves GETs like ComfyHandler and captures /free POST bodies."""
+
+    free_bodies = []
+
+    def do_POST(self):
+        if self.path == "/free":
+            length = int(self.headers.get("Content-Length", 0))
+            FreeCaptureHandler.free_bodies.append(self.rfile.read(length).decode())
+            self.reply({})
+        else:
+            self.send_error(404)
+
+
 class QuietHTTPServer(ThreadingHTTPServer):
     def handle_error(self, request, client_address):
         pass
@@ -225,6 +239,27 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(value["occupied"])
         self.assertTrue(value["owned"])
         self.assertNotIn("logEvents", value)
+
+    def test_free_posts_unload_and_cache_flags(self):
+        FreeCaptureHandler.free_bodies = []
+        server = ThreadingHTTPServer(("127.0.0.1", 0), FreeCaptureHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = subprocess.run(
+                ["python3", str(CONTROLLER), "free", "--host", "127.0.0.1",
+                 "--port", str(server.server_port)],
+                check=True, text=True, capture_output=True,
+            )
+            value = json.loads(result.stdout)
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertTrue(value["ok"])
+        self.assertEqual(
+            [{"unload_models": True, "free_node_cache": True}],
+            [json.loads(body) for body in FreeCaptureHandler.free_bodies],
+        )
 
     def test_parse_progress_uses_last_tqdm_chunk(self):
         controller = load_controller()

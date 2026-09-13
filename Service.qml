@@ -213,6 +213,13 @@ Item {
   }
   function stopServer() { if (owned || healthy) runAction(commonArgs("stop"), "Stopping ComfyUI…") }
   function interrupt() { if (healthy && runningCount > 0) runAction(commonArgs("interrupt"), "Requesting interrupt…") }
+  // Free never interrupts: the server releases what it can — bench models,
+  // previous-run cache, the allocator — while jobs run or queue unaffected.
+  function free() {
+    if (!healthy) return
+    runAction(commonArgs("free"), runningCount > 0 || pendingCount > 0
+      ? "Freeing VRAM — running jobs continue" : "Freeing VRAM…")
+  }
   function openServer() { if (monitoringEnabled && healthy && serverUrl !== "") Qt.openUrlExternally(serverUrl) }
 
   function acceptReading(parsed) {

@@ -119,6 +119,9 @@ Panel {
     }
     if (comfy.healthy) result.push({ label: "Open ComfyUI", kind: "open" })
     else if (comfy.state !== "foreign-port" && comfy.state !== "starting") result.push({ label: "Start ComfyUI", kind: "start" })
+    // Free never interrupts, so it needs no queue gating: the server releases
+    // what it can and any running or queued jobs simply continue.
+    if (comfy.healthy) result.push({ label: "Free VRAM", kind: "free" })
     if (comfy.runningCount > 0) result.push({ label: "Interrupt generation", kind: "interrupt" })
     // A server this plugin started is stopped through its systemd unit; any
     // other healthy local server is stopped by signalling its listener. The
@@ -135,6 +138,7 @@ Panel {
     var kind = list[index].kind
     if (kind === "open") comfy.openServer()
     else if (kind === "start") comfy.startServer()
+    else if (kind === "free") comfy.free()
     else if (kind === "interrupt") comfy.interrupt()
     else if (kind === "stop") comfy.stopServer()
     else if (kind === "ack") comfy.acknowledge()
@@ -202,6 +206,7 @@ Panel {
     function startServer() {}
     function stopServer() {}
     function interrupt() {}
+    function free() {}
     function acknowledge() {}
   }
 
@@ -221,6 +226,7 @@ Panel {
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
     function refresh(): string { comfy.refresh(); return "ok" }
+    function free(): string { comfy.free(); return "ok" }
     function status(): string { return comfy.state }
   }
 
@@ -291,6 +297,7 @@ Panel {
       onTextKey: function(text) {
         if (text === "r" || text === "R") comfy.refresh()
         else if ((text === "o" || text === "O") && comfy.healthy) comfy.openServer()
+        else if ((text === "f" || text === "F")) comfy.free()
         else if (text === "p" || text === "P") root.previewExpanded = !root.previewExpanded
         else if (text === "j" || text === "J") root.jobsExpanded = !root.jobsExpanded
         else if (text === "e" || text === "E") root.eventsExpanded = !root.eventsExpanded

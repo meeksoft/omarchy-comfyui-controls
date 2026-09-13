@@ -90,6 +90,13 @@ too. The action is labelled **Stop managed server** in the first case and
 **Stop ComfyUI server** in the second. A remote host, or a port that does not
 answer as ComfyUI, is refused rather than signalled.
 
+**Free VRAM** unloads models and clears cached node outputs through ComfyUI's
+`/free` endpoint. It is offered whenever the server is healthy and never
+interrupts: running and queued jobs simply continue (slower) as weights
+re-stage, while the server releases what it can — bench models, previous-run
+cache, the allocator. `quickshell -p /usr/share/omarchy/shell ipc call
+meeksoft.comfyui-controls free` frees without opening the panel.
+
 While a popup is open, the plugin checks Omarchy's current lock state and
 closes every monitor's popup when locking is observed. Loaded previews are
 destroyed and status, WebSocket, and visual helpers pause whenever the popup
@@ -100,8 +107,8 @@ state and refreshes it after a brief safety delay.
 
 When the panel is focused, press `P` to expand the latest output, `J` to toggle
 the jobs list, `E` to toggle diagnostics, `R` to refresh, `O` to open ComfyUI,
-or `A` to dismiss an active alert. Right-click opens ComfyUI; middle-click
-refreshes.
+`F` to free VRAM, or `A` to dismiss an active alert. Right-click opens ComfyUI;
+middle-click refreshes.
 
 Error and crash states raise a desktop notification and show a dismissable
 badge in the bar.
@@ -154,6 +161,7 @@ bin/comfyui-control status [--host HOST] [--port PORT] [--light]
 bin/comfyui-control start --root COMFYUI_FOLDER [--python PYTHON]
 bin/comfyui-control stop
 bin/comfyui-control interrupt
+bin/comfyui-control free
 bin/comfyui-control watch
 ```
 

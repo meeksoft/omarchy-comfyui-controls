@@ -28,6 +28,15 @@ def api(host, port, path, method="GET", body=None, timeout=1.5):
         return json.load(response)
 
 
+def post(host, port, path, body, timeout=1.5):
+    """Fire a JSON POST whose reply is not JSON: ComfyUI answers /interrupt
+    and /free with 200 and an empty body, so the response must not be parsed."""
+    request = Request(url(host, port, path), data=body, method="POST")
+    request.add_header("Content-Type", "application/json")
+    with urlopen(request, timeout=timeout) as response:
+        response.read()
+
+
 def health(host, port, timeout=1.5):
     try:
         value = api(host, port, "/system_stats", timeout=timeout)
@@ -487,10 +496,20 @@ def interrupt(host, port):
     if not health(host, port):
         return {"ok": False, "state": "offline", "message": "ComfyUI is not available."}
     try:
-        api(host, port, "/interrupt", "POST", b"{}")
+        post(host, port, "/interrupt", b"{}")
         return {"ok": True, "state": "idle", "message": "Interrupt requested."}
     except (OSError, ValueError, HTTPError, URLError) as error:
         return {"ok": False, "state": "error", "message": f"Interrupt failed: {error}"[:240]}
+
+
+def free(host, port):
+    if not health(host, port):
+        return {"ok": False, "state": "offline", "message": "ComfyUI is not available."}
+    try:
+        post(host, port, "/free", b'{"unload_models":true,"free_node_cache":true}')
+        return {"ok": True, "state": "idle", "message": "Free requested."}
+    except (OSError, ValueError, HTTPError, URLError) as error:
+        return {"ok": False, "state": "error", "message": f"Free failed: {error}"[:240]}
 
 
 def exact(connection, count):
@@ -552,7 +571,8 @@ def arguments():
     status_parser.add_argument("--light", action="store_true")
     launch = commands.add_parser("start", parents=[common])
     launch.add_argument("--root", default=""); launch.add_argument("--python", default=""); launch.add_argument("--start-timeout", type=float, default=30)
-    commands.add_parser("stop", parents=[common]); commands.add_parser("interrupt", parents=[common]); commands.add_parser("watch", parents=[common])
+    commands.add_parser("stop", parents=[common]); commands.add_parser("interrupt", parents=[common])
+    commands.add_parser("free", parents=[common]); commands.add_parser("watch", parents=[common])
     return parser.parse_args()
 
 
@@ -561,7 +581,7 @@ def main():
     try:
         if not 1 <= args.port <= 65535: raise ValueError("Port must be between 1 and 65535.")
         if args.command == "watch": return watch(args.host, args.port)
-        result = status(args.host, args.port, args.log_path, args.light) if args.command == "status" else start(args) if args.command == "start" else stop(args.host, args.port) if args.command == "stop" else interrupt(args.host, args.port)
+        result = status(args.host, args.port, args.log_path, args.light) if args.command == "status" else start(args) if args.command == "start" else stop(args.host, args.port) if args.command == "stop" else interrupt(args.host, args.port) if args.command == "interrupt" else free(args.host, args.port)
         emit(result); return 0 if result.get("ok") else 1
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         emit({"ok": False, "state": "error", "message": str(error)[:240]}); return 1
